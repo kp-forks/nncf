@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -14,13 +14,14 @@ from abc import ABC
 from abc import abstractmethod
 from enum import Enum
 from functools import partial
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import torch
 from torch import distributed
 from torch import nn
 
+import nncf
 from nncf.common.graph import NNCFNodeName
 from nncf.common.logging import nncf_logger
 from nncf.common.quantization.quantizer_setup import QuantizationPointId
@@ -28,7 +29,7 @@ from nncf.common.quantization.quantizer_setup import QuantizerSetupBase
 from nncf.common.quantization.quantizers import calculate_asymmetric_level_ranges
 from nncf.common.quantization.quantizers import calculate_symmetric_level_ranges
 from nncf.common.quantization.quantizers import get_num_levels
-from nncf.common.quantization.structs import QuantizationMode
+from nncf.common.quantization.structs import QuantizationScheme as QuantizationMode
 from nncf.common.quantization.structs import QuantizerConfig
 from nncf.common.quantization.structs import QuantizerSpec
 from nncf.common.utils.debug import is_debug
@@ -40,12 +41,21 @@ from nncf.torch.graph.transformations.commands import PTTargetPoint
 from nncf.torch.graph.transformations.commands import TargetType
 from nncf.torch.layer_utils import COMPRESSION_MODULES
 from nncf.torch.layer_utils import CompressionParameter
+from nncf.torch.layer_utils import StatefullModuleInterface
 from nncf.torch.quantization.quantize_functions import ExportQuantizeToFakeQuantize
 from nncf.torch.quantization.quantize_functions import ExportQuantizeToONNXQuantDequant
 from nncf.torch.quantization.quantize_functions import TuneRange
 from nncf.torch.quantization.quantize_functions import asymmetric_quantize
+from nncf.torch.quantization.quantize_functions import decompress_asymmetric
+from nncf.torch.quantization.quantize_functions import decompress_symmetric
 from nncf.torch.quantization.quantize_functions import get_scale_zp_from_input_low_input_high
+from nncf.torch.quantization.quantize_functions import pack_int4
+from nncf.torch.quantization.quantize_functions import pack_uint4
 from nncf.torch.quantization.quantize_functions import symmetric_quantize
+from nncf.torch.quantization.quantize_functions import unpack_int4
+from nncf.torch.quantization.quantize_functions import unpack_uint4
+from nncf.torch.return_types import maybe_get_values_from_torch_return_type
+from nncf.torch.return_types import maybe_wrap_to_torch_return_type
 from nncf.torch.utils import get_flat_tensor_contents_string
 from nncf.torch.utils import get_model_device
 from nncf.torch.utils import is_tracing_state
@@ -279,9 +289,10 @@ class PTQuantizerSetup(QuantizerSetupBase):
         self.quantization_points[qp_id] = qp
 
 
-class BaseQuantizer(nn.Module, ABC):
+class BaseQuantizer(nn.Module, StatefullModuleInterface, ABC):
     def __init__(self, qspec: PTQuantizerSpec):
         super().__init__()
+        self._qspec = qspec
         self._narrow_range = qspec.narrow_range
         self._signedness_to_force = qspec.signedness_to_force
         self._is_using_log_scale_storage = qspec.logarithm_scale
@@ -318,7 +329,7 @@ class BaseQuantizer(nn.Module, ABC):
             def hook_fn(
                 self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs, module
             ):
-                for module_key in module.state_dict().keys():
+                for module_key in module.state_dict():
                     candidate = prefix + module_key
                     if candidate in state_dict:
                         module.initialized = True
@@ -368,7 +379,16 @@ class BaseQuantizer(nn.Module, ABC):
         self.enabled[0] = 0
         self.disable_gradients()
 
-    def forward(self, x):
+    def forward(self, x: Union[torch.Tensor, tuple]):
+        """
+        Method that unwraps return types if it is needed
+        before acutal quantization forward impl
+        """
+        x_unwrapped = maybe_get_values_from_torch_return_type(x)
+        result = self._forward_impl(x_unwrapped)
+        return maybe_wrap_to_torch_return_type(result, x)
+
+    def _forward_impl(self, x: torch.Tensor):
         if is_debug():
             self.call_count += 1
         # TODO: refactor to get rid of extra if's and calls on each forward
@@ -489,7 +509,7 @@ class BaseQuantizer(nn.Module, ABC):
             y_scale, y_zero_point = get_scale_zp_from_input_low_input_high(level_low, level_high, input_low, input_high)
             possible_axes = self._possible_per_channel_dimensions()
             if len(possible_axes) > 1:
-                raise RuntimeError(
+                raise nncf.InternalError(
                     f"Impossible to determine the per-channel axis for a scale shape {self.scale_shape} - "
                     f"more than one dimension is >1"
                 )
@@ -521,7 +541,7 @@ class BaseQuantizer(nn.Module, ABC):
             if self._export_mode == QuantizerExportMode.ONNX_QUANTIZE_DEQUANTIZE_PAIRS:
                 x, y_scale, y_zero_point, axis = self._prepare_qdq_export_quantization(x)
                 return ExportQuantizeToONNXQuantDequant.apply(x, y_scale, y_zero_point, axis)
-        raise RuntimeError("Unknown export mode")
+        raise nncf.InternalError("Unknown export mode")
 
     def extra_repr(self):
         return "bit={}, ch={}".format(self.num_bits, self.per_channel)
@@ -549,6 +569,14 @@ class BaseQuantizer(nn.Module, ABC):
             scale - Quantizer scale.
             zero_point - Quantizer zero point.
         """
+
+    def get_config(self):
+        return self._qspec.get_state()
+
+    @classmethod
+    def from_config(cls, state) -> "BaseQuantizer":
+        qsetup = PTQuantizerSpec.from_state(state)
+        return cls(qsetup)
 
 
 class QuantizersSwitcher:
@@ -1019,3 +1047,191 @@ def get_scale_shape(input_shape: List[int], is_weights: bool, per_channel: bool,
     if not per_channel:
         return [1]
     return get_per_channel_scale_shape(input_shape, is_weights, channel_idx)
+
+
+class BaseWeightsDecompressor(nn.Module, ABC):
+    """
+    Base class for implementing weights decompression modules within NNCF.
+
+    This class is intended to serve as the foundation for modules that handle the decompression
+    of quantized model weights. It provides an interface for defining the quantization mode and
+    packing the weights according to the specified quantization strategy. Classes inheriting from
+    this base class must implement the abstract methods for packing and handling the quantization mode.
+    """
+
+    @property
+    @abstractmethod
+    def quantization_mode(self) -> QuantizationMode:
+        """
+        Property that specifies the quantization mode used for compressing weights.
+
+        This method must be implemented to return the specific mode of quantization that
+        the decompressor is using, such as symmetric or asymmetric quantization.
+
+        :return: The quantization mode as an instance of `QuantizationMode`.
+        """
+
+    @abstractmethod
+    def pack_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        """
+        Pack the given weight tensor according to the selected quantization mode.
+
+        :param weight: The tensor containing the weight values to be packed.
+        :return: The packed tensor.
+        """
+
+
+class INT8AsymmetricWeightsDecompressor(BaseWeightsDecompressor):
+    """
+    Applies asymmetric decompression of compressed weights in the forward pass
+    """
+
+    def __init__(self, scale: torch.Tensor, zero_point: torch.Tensor, result_dtype: Optional[torch.dtype] = None):
+        """
+        :param scale: A scale in quantization scheme
+        :param zero_point: A zero point in quantization scheme
+        :param result_dtype: (Optional) A data type that result should be cast to
+        """
+        super().__init__()
+        self.register_buffer("_scale", scale.type(dtype=torch.float16))
+        self.register_buffer("_zero_point", self.pack_weight(zero_point))
+        self.result_dtype = result_dtype
+
+    @property
+    def quantization_mode(self) -> QuantizationMode:
+        return QuantizationMode.ASYMMETRIC
+
+    def pack_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        if torch.is_floating_point(weight):
+            raise ValueError(f"Invalid weight dtype {weight.type}. Integer types are supported.")
+        if torch.any((weight < 0) | (weight > 255)):
+            raise ValueError("Weight values are not in [0, 255].")
+        return weight.type(dtype=torch.uint8)
+
+    def forward(self, x) -> torch.Tensor:
+        result = decompress_asymmetric(x, self._scale, self._zero_point)
+        result = result.type(dtype=self.result_dtype) if self.result_dtype is not None else result
+        return result
+
+
+class INT8SymmetricWeightsDecompressor(BaseWeightsDecompressor):
+    """
+    Applies symmetric decompression of compressed weights in the forward pass
+    """
+
+    def __init__(self, scale: torch.Tensor, result_dtype: Optional[torch.dtype] = None):
+        """
+        :param scale: A scale in quantization scheme
+        :param result_dtype: (Optional) A data type that result should be cast to
+        """
+        super().__init__()
+        self.register_buffer("_scale", scale.type(dtype=torch.float16))
+        self.result_dtype = result_dtype
+
+    @property
+    def quantization_mode(self) -> QuantizationMode:
+        return QuantizationMode.SYMMETRIC
+
+    def pack_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        if torch.is_floating_point(weight):
+            raise ValueError(f"Invalid weight dtype {weight.type}. Integer types are supported.")
+        if torch.any((weight < -128) | (weight > 127)):
+            raise ValueError("Weight values are not in [-128, 127].")
+        return weight.type(dtype=torch.int8)
+
+    def forward(self, x) -> torch.Tensor:
+        result = decompress_symmetric(x, self._scale)
+        result = result.type(dtype=self.result_dtype) if self.result_dtype is not None else result
+        return result
+
+
+class INT4AsymmetricWeightsDecompressor(BaseWeightsDecompressor):
+    def __init__(
+        self,
+        scale: torch.Tensor,
+        zero_point: torch.Tensor,
+        compressed_weight_shape: Tuple[int, ...],
+        result_shape: Optional[Tuple[int, ...]] = None,
+        result_dtype: Optional[torch.dtype] = None,
+    ):
+        """
+        :param scale: A scale in quantization scheme
+        :param zero_point: A zero point in quantization scheme
+        :param compressed_weight_shape: A compressed weight shape
+        :param result_shape: (Optional) A shape that result should be reshaped
+        :param result_dtype: (Optional) A data type that result should be cast to
+        """
+        super().__init__()
+        self.register_buffer("_scale", scale.type(dtype=torch.float16))
+
+        self.zero_point_shape = zero_point.shape
+        self.register_buffer("_zero_point", self.pack_weight(zero_point))
+
+        self.compressed_weight_shape = compressed_weight_shape
+        self.result_shape = result_shape
+        self.result_dtype = result_dtype
+
+    @property
+    def quantization_mode(self) -> QuantizationMode:
+        return QuantizationMode.ASYMMETRIC
+
+    def pack_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        if torch.is_floating_point(weight):
+            raise ValueError(f"Invalid weight dtype {weight.type}. Integer types are supported.")
+        if torch.any((weight < 0) | (weight > 15)):
+            raise ValueError("Weight values are not in [0, 15].")
+        return pack_uint4(weight.type(dtype=torch.uint8))
+
+    def forward(self, x):
+        x = unpack_uint4(x)
+        x = x.reshape(self.compressed_weight_shape)
+
+        zero_point = unpack_uint4(self._zero_point)
+        zero_point = zero_point.reshape(self.zero_point_shape)
+
+        result = decompress_asymmetric(x, self._scale, zero_point)
+        result = result.reshape(self.result_shape) if self.result_shape is not None else result
+        result = result.type(dtype=self.result_dtype) if self.result_dtype is not None else result
+        return result
+
+
+class INT4SymmetricWeightsDecompressor(BaseWeightsDecompressor):
+    def __init__(
+        self,
+        scale: torch.Tensor,
+        compressed_weight_shape: Tuple[int, ...],
+        result_shape: Optional[Tuple[int, ...]] = None,
+        result_dtype: Optional[torch.dtype] = None,
+    ):
+        """
+        :param scale: A scale in quantization scheme
+        :param compressed_weight_shape: A compressed weight shape
+        :param result_shape: (Optional) A shape that result should be reshaped
+        :param result_dtype: (Optional) A data type that result should be cast to
+        """
+        super().__init__()
+        self.register_buffer("_scale", scale.type(dtype=torch.float16))
+
+        self.compressed_weight_shape = compressed_weight_shape
+        self.result_shape = result_shape
+        self.result_dtype = result_dtype
+
+    @property
+    def quantization_mode(self) -> QuantizationMode:
+        return QuantizationMode.SYMMETRIC
+
+    def pack_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        if torch.is_floating_point(weight):
+            raise ValueError(f"Invalid weight dtype {weight.type}. Integer types are supported.")
+        if torch.any((weight < -8) | (weight > 7)):
+            raise ValueError("Tensor values are not in [-8, 7].")
+        return pack_int4(weight.type(dtype=torch.int8))
+
+    def forward(self, x):
+        x = unpack_int4(x)
+        x = x.reshape(self.compressed_weight_shape)
+
+        result = decompress_symmetric(x, self._scale)
+        result = result.reshape(self.result_shape) if self.result_shape is not None else result
+        result = result.type(dtype=self.result_dtype) if self.result_dtype is not None else result
+        return result

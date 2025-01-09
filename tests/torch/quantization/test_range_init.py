@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -23,6 +23,7 @@ from torch import nn
 from torch.utils.data import DataLoader
 from torchvision.models import squeezenet1_1
 
+import nncf
 import nncf.torch.tensor_statistics.collectors as pt_collectors
 from nncf.common.graph import NNCFNodeName
 from nncf.common.quantization.initialization.range import PerLayerRangeInitConfig
@@ -30,16 +31,17 @@ from nncf.common.quantization.initialization.range import RangeInitConfig
 from nncf.common.quantization.quantizer_setup import ActivationQuantizationInsertionPoint
 from nncf.common.quantization.quantizer_setup import SingleConfigQuantizationPoint
 from nncf.common.quantization.quantizer_setup import WeightQuantizationInsertionPoint
-from nncf.common.quantization.structs import QuantizationMode
+from nncf.common.quantization.structs import QuantizationScheme as QuantizationMode
 from nncf.common.quantization.structs import QuantizerConfig
 from nncf.common.quantization.structs import QuantizerGroup
 from nncf.config import NNCFConfig
 from nncf.config.structures import QuantizationRangeInitArgs
+from nncf.tensor import Tensor
 from nncf.torch import utils
 from nncf.torch.checkpoint_loading import load_state
 from nncf.torch.initialization import DefaultInitializingDataLoader
 from nncf.torch.initialization import wrap_dataloader_for_init
-from nncf.torch.nncf_network import EXTERNAL_QUANTIZERS_STORAGE_NAME
+from nncf.torch.quantization.external_quantizer import EXTERNAL_QUANTIZERS_STORAGE_NAME
 from nncf.torch.quantization.init_range import PTRangeInitCollectorParams
 from nncf.torch.quantization.init_range import PTRangeInitParams
 from nncf.torch.quantization.init_range import StatCollectorGenerator
@@ -48,7 +50,6 @@ from nncf.torch.quantization.layers import AsymmetricQuantizer
 from nncf.torch.quantization.layers import BaseQuantizer
 from nncf.torch.quantization.layers import PTQuantizerSpec
 from nncf.torch.quantization.layers import SymmetricQuantizer
-from nncf.torch.tensor import PTNNCFTensor
 from nncf.torch.tensor_statistics.statistics import pt_convert_stat_to_min_max_tensor_stat
 from nncf.torch.utils import get_all_modules_by_type
 from nncf.torch.utils import safe_thread_call
@@ -130,6 +131,7 @@ def save_params(model, out_file_path):
         torch.save(gpu_scale_signed_params, out_file)
 
 
+@pytest.mark.cuda
 def test_multiprocessing_distributed_shares_init_scales_signedness_across_gpus(tmp_path, runs_subprocess_in_precommit):
     if not torch.cuda.is_available():
         pytest.skip("Skipping CUDA test cases for CPU only setups")
@@ -171,7 +173,11 @@ def generate_qp(
     elif target is QuantizerGroup.ACTIVATIONS:
         qip = ActivationQuantizationInsertionPoint(target_node_name=node_name, input_port_id=input_port_id)
     else:
-        raise RuntimeError()
+        raise nncf.InvalidQuantizerGroupError(
+            f"Invalid quantizer group: {target}. "
+            f"Supported groups are {QuantizerGroup.WEIGHTS}"
+            f"and {QuantizerGroup.ACTIVATIONS}."
+        )
     return SingleConfigQuantizationPoint(qip, QuantizerConfig(), [node_name])
 
 
@@ -492,7 +498,7 @@ class SingleConv2dIdentityModel(torch.nn.Module):
 
 
 def _get_init_tensor_for_range_init_test() -> torch.Tensor:
-    test_input_sample = torch.empty([3, 100, 100])
+    test_input_sample = torch.ones([3, 100, 100])
     test_input_sample[0] = torch.range(1, 10_000).view((100, 100))
     test_input_sample[1] = test_input_sample[0] * -2
     test_input_sample[2] = test_input_sample[0] * 3
@@ -1016,10 +1022,10 @@ def test_quantize_range_init_sets_correct_scale_shapes(quantizer_range_init_test
         collector = StatCollectorGenerator.generate_stat_collector_for_range_init_config(
             range_init_config, tuple(quantizer.scale_shape), collector_params
         )
-        collector.register_input_for_all_reducers(PTNNCFTensor(torch.ones(test_struct.input_shape)))
+        collector.register_input_for_all_reducers(Tensor(torch.ones(test_struct.input_shape)))
         stat = collector.get_statistics()
         minmax_values = pt_convert_stat_to_min_max_tensor_stat(stat)
-        quantizer.apply_minmax_init(min_values=minmax_values.min_values, max_values=minmax_values.max_values)
+        quantizer.apply_minmax_init(min_values=minmax_values.min_values.data, max_values=minmax_values.max_values.data)
 
         assert quantizer.scale_shape == test_struct.ref_scale_shape
         if quantization_mode == QuantizationMode.SYMMETRIC:

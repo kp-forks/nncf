@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 
+import nncf
 from examples.common.paths import configure_paths
 from examples.common.sample_config import create_sample_config
 from examples.tensorflow.common.argparser import get_common_argument_parser
@@ -90,7 +91,7 @@ def load_checkpoint(checkpoint, ckpt_path):
     if not path_to_checkpoint:
         logger.info("No checkpoint detected.")
         if ckpt_path:
-            raise RuntimeError(f"ckpt_path was given, but no checkpoint detected in path: {ckpt_path}")
+            raise nncf.ValidationError(f"ckpt_path was given, but no checkpoint detected in path: {ckpt_path}")
 
     logger.info("Checkpoint file {} found and restoring from checkpoint".format(path_to_checkpoint))
     status = checkpoint.restore(path_to_checkpoint)
@@ -323,8 +324,7 @@ def run(config):
 
     # Training parameters
     epochs = config.epochs
-    steps_per_epoch = train_builder.steps_per_epoch
-    num_test_batches = test_builder.steps_per_epoch
+    steps_per_epoch, num_test_batches = train_builder.steps_per_epoch, test_builder.steps_per_epoch
 
     # Create model builder
     model_builder = get_model_builder(config)
@@ -336,10 +336,7 @@ def run(config):
     )
 
     resume_training = config.ckpt_path is not None
-
-    compression_state = None
-    if resume_training:
-        compression_state = load_compression_state(config.ckpt_path)
+    compression_state = load_compression_state(config.ckpt_path) if resume_training else None
 
     with TFModelManager(model_builder.build_model, config.nncf_config, weights=config.get("weights", None)) as model:
         with strategy.scope():
@@ -384,6 +381,8 @@ def run(config):
     test_step = create_test_step_fn(strategy, compress_model, predict_post_process_fn)
 
     if "train" in config.mode:
+        if config.weights is None and not resume_training:
+            logger.warning("Pretrained checkpoint is not provided. This may lead to poor training results!")
         if is_accuracy_aware_training(config):
             train_summary_writer = SummaryWriter(config.log_dir, "train")
             timer = Timer()

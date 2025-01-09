@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -19,6 +19,7 @@ from typing import Deque, Dict, List, Optional, Set, Tuple
 
 import networkx as nx
 
+import nncf
 from nncf.common.graph import NNCFNodeName
 from nncf.common.graph.operator_metatypes import INPUT_NOOP_METATYPES
 from nncf.common.graph.operator_metatypes import OUTPUT_NOOP_METATYPES
@@ -33,6 +34,7 @@ from nncf.common.quantization.quantizer_propagation.structs import IgnoreReason
 from nncf.common.quantization.quantizer_propagation.structs import PropagatingQuantizer
 from nncf.common.quantization.quantizer_propagation.structs import PropagationPath
 from nncf.common.quantization.quantizer_propagation.structs import QuantizationTrait
+from nncf.common.quantization.quantizer_propagation.structs import QuantizerPropagationRule
 from nncf.common.quantization.quantizer_propagation.structs import QuantizerPropagationStateGraphNodeType
 from nncf.common.quantization.quantizer_setup import DEFAULT_QUANTIZER_CONFIG
 from nncf.common.quantization.quantizer_setup import MultiConfigQuantizerSetup
@@ -40,7 +42,7 @@ from nncf.common.quantization.quantizer_setup import QuantizationPointId
 from nncf.common.quantization.quantizer_setup import SingleConfigQuantizerSetup
 from nncf.common.quantization.structs import QuantizableWeightedLayerNode
 from nncf.common.quantization.structs import QuantizationConstraints
-from nncf.common.quantization.structs import QuantizationMode
+from nncf.common.quantization.structs import QuantizationScheme as QuantizationMode
 from nncf.common.quantization.structs import QuantizerConfig
 from nncf.common.quantization.structs import QuantizerGroup
 from nncf.common.quantization.structs import UnifiedScaleType
@@ -56,25 +58,6 @@ class TransitionStatus(Enum):
     SHOULD_MERGE = 1
     SHOULD_NOT_TRANSITION = 2
     SHOULD_WAIT_FOR_MERGE = 3
-
-
-class PropagationStrategy(Enum):
-    # While propagating up through a downward-branching node:
-    # ... do not merge at all
-    DO_NOT_MERGE_BRANCH_FQS = 0
-
-    # ... only merge for exact configuration space matches
-    MERGE_IF_ALL_BRANCH_FQ_OPTIONS_SAME = 1
-
-    # ... merge common parts, and if a branch quantizer has options for
-    # narrowing (bitwidth/mode/per-channel/etc.) in addition to
-    # the common part, keep the quantizer on branch
-    MERGE_WITH_POTENTIAL_REQUANTIZATION = 2
-
-    # ... merge common config options into a single config space for the global FQ,
-    # do not merge if this is impossible for the current branching situation and given
-    # HW config file
-    MERGE_WITH_SINGLE_FQ_RESULT = 3
 
 
 class FinalizedQuantizationProposal:
@@ -143,7 +126,9 @@ class QuantizationProposal:
         """
         prior_list = self.quantizer_setup.quantization_points[quantization_point_id].possible_qconfigs
         if not all(qc in prior_list for qc in constrained_config_list):
-            raise RuntimeError("Constrained config list is incompatible with the result of the quantizer propagation!")
+            raise nncf.InternalError(
+                "Constrained config list is incompatible with the result of the quantizer propagation!"
+            )
         # TODO (vshampor): only allow to constrain 'input-group'-wise?
         self.quantizer_setup.quantization_points[quantization_point_id].possible_qconfigs = constrained_config_list
 
@@ -188,7 +173,7 @@ class QuantizationProposal:
                         )
                     )
                     if not compatible_initial_qconfs:
-                        raise RuntimeError(
+                        raise nncf.InternalError(
                             "The final quantizer setup has configurations that were not present in the "
                             "initial proposal!"
                         )
@@ -314,7 +299,7 @@ class QuantizerPropagationSolver:
         QuantizerConfig(num_bits=8, mode=QuantizationMode.SYMMETRIC, signedness_to_force=None, per_channel=False)
     ]
 
-    DEFAULT_PROPAGATION_STRATEGY = PropagationStrategy.MERGE_WITH_SINGLE_FQ_RESULT
+    DEFAULT_PROPAGATION_STRATEGY = QuantizerPropagationRule.MERGE_ALL_IN_ONE
 
     def __init__(
         self,
@@ -324,7 +309,7 @@ class QuantizerPropagationSolver:
         weight_target_scopes: List[str] = None,
         hw_config: HWConfig = None,
         default_trait_to_metatype_map: Dict[QuantizationTrait, List[OperatorMetatype]] = None,
-        propagation_strategy: PropagationStrategy = None,
+        propagation_strategy: QuantizerPropagationRule = None,
         default_qconfig_list: List[QuantizerConfig] = None,
         quantizable_layer_nodes: List[QuantizableWeightedLayerNode] = None,
         scope_overrides: Dict = None,
@@ -429,9 +414,11 @@ class QuantizerPropagationSolver:
         if default_qconfig_list is not None:
             for op_meta, qconf_list in self._operator_allowed_qconfigs_map.items():
                 trait = self._operator_quantization_trait_map.get(op_meta, QuantizationTrait.NON_QUANTIZABLE)
-                if trait == QuantizationTrait.INPUTS_QUANTIZABLE:
-                    if HWConfig.is_qconf_list_corresponding_to_unspecified_op(qconf_list):
-                        self._operator_allowed_qconfigs_map[op_meta] = default_qconfig_list
+                if (
+                    trait == QuantizationTrait.INPUTS_QUANTIZABLE
+                    and HWConfig.is_qconf_list_corresponding_to_unspecified_op(qconf_list)
+                ):
+                    self._operator_allowed_qconfigs_map[op_meta] = default_qconfig_list
         self._active_propagating_quantizers_queue = deque()
         self._finished_propagating_quantizers: List[PropagatingQuantizer] = []
         self._quantizers_waiting_for_branch_merge = QuantizersWaitingForMergeManager()
@@ -463,7 +450,9 @@ class QuantizerPropagationSolver:
                 nncf_logger.debug(f"Ignored adding weight quantizer for: {node_name}")
         return weight_quantizable_node_names_vs_qconfigs
 
-    def run_on_ip_graph(self, ip_graph: InsertionPointGraph) -> QuantizationProposal:
+    def run_on_ip_graph(
+        self, ip_graph: InsertionPointGraph, metatypes_for_filter: Optional[List[OperatorMetatype]] = None
+    ) -> QuantizationProposal:
         """
         The main function to be used on an InsertionPointGraph to produce
         the list of insertion commands and configs corresponding to the desired quantized
@@ -474,6 +463,7 @@ class QuantizerPropagationSolver:
         :param ip_graph: The InsertionPointGraph, potentially with fused operations w.r.t. the
         original model graph. The propagating quantizers will travel along the pre- and post-
         hook nodes registered in this graph.
+        :param metatypes_for_filter: Metatypes are used for the removal criterion.
         :return: The intermediate propagation state in the form of QuantizationProposal, which
         defines unambiguously the locations of the propagating quantizers, but not the final
         configurations.
@@ -508,6 +498,8 @@ class QuantizerPropagationSolver:
             iteration_counter += 1
 
         quant_prop_graph = self._filter_integer_input_quantizers(quant_prop_graph)
+        if metatypes_for_filter:
+            quant_prop_graph = self._filter_quantizers_by_metatypes(quant_prop_graph, metatypes_for_filter)
 
         if self._visualizer is not None:
             self._visualizer.visualize_quantizer_propagation(self, quant_prop_graph, "proposed")
@@ -587,7 +579,7 @@ class QuantizerPropagationSolver:
         if Counter(final_weight_quantizable_node_names_vs_qconfig_dict.keys()) != Counter(
             self._weight_quantizable_node_names_vs_qconfigs.keys()
         ):
-            raise RuntimeError("Final weight quantizer setup is inconsistent with initial solver assumptions!")
+            raise nncf.InternalError("Final weight quantizer setup is inconsistent with initial solver assumptions!")
 
         multi_setup_with_one_config_per_point = quant_prop_graph.create_quantizer_setup(
             final_weight_quantizable_node_names_vs_qconfig_dict
@@ -622,10 +614,7 @@ class QuantizerPropagationSolver:
             qconfs_list = [pq.potential_quant_configs for pq in waiting_pqs_list]
             merged_qconf_list, branch_qconf_lists = self.get_merged_qconfigs_for_downward_branching_case(qconfs_list)
 
-            if (
-                merged_qconf_list is None
-                and self._propagation_strategy == PropagationStrategy.MERGE_WITH_SINGLE_FQ_RESULT
-            ):
+            if merged_qconf_list is None and self._propagation_strategy == QuantizerPropagationRule.MERGE_ALL_IN_ONE:
                 all_confs = "\n".join(", ".join([f"[{str(qconf)}]" for qconf in qconfs]) for qconfs in qconfs_list)
                 nncf_logger.debug(
                     f"Could not merge the quantizers at branching point {branching_node_key} - "
@@ -728,7 +717,7 @@ class QuantizerPropagationSolver:
             )
         )
 
-        unified_scale_path_groups_vs_pqs = {k: [] for k in unified_scale_grouped_paths.keys() if k is not None}
+        unified_scale_path_groups_vs_pqs = {k: [] for k in unified_scale_grouped_paths if k is not None}
         existing_pq_assigned = False
         for gid, path_group in unified_scale_grouped_paths.items():
             for _ in path_group:
@@ -826,9 +815,9 @@ class QuantizerPropagationSolver:
                 trait = self._operator_quantization_trait_map.get(quant_det_id, QuantizationTrait.NON_QUANTIZABLE)
                 node[QuantizerPropagationStateGraph.QUANTIZATION_TRAIT_NODE_ATTR] = trait
                 if trait == QuantizationTrait.INPUTS_QUANTIZABLE:
-                    node[
-                        QuantizerPropagationStateGraph.ALLOWED_INPUT_QUANTIZATION_TYPES_NODE_ATTR
-                    ] = self.get_allowed_quantizer_configs_for_operator(quant_det_id)
+                    node[QuantizerPropagationStateGraph.ALLOWED_INPUT_QUANTIZATION_TYPES_NODE_ATTR] = (
+                        self.get_allowed_quantizer_configs_for_operator(quant_det_id)
+                    )
         return quant_prop_graph
 
     def get_operator_quantization_traits_map(self) -> Dict[OperatorMetatype, QuantizationTrait]:
@@ -1014,7 +1003,7 @@ class QuantizerPropagationSolver:
                     )
                 )
                 if len(matching_indices) == 0:
-                    raise RuntimeError(
+                    raise nncf.ValidationError(
                         "No match for linked quantizer entry {} among activation quantizers!".format(
                             group_member_node_name
                         )
@@ -1022,7 +1011,7 @@ class QuantizerPropagationSolver:
 
                 for target_idx in matching_indices:
                     if target_idx in insertion_point_indices_vs_group_id:
-                        raise RuntimeError(
+                        raise nncf.InternalError(
                             "Linked activation quantizer groups {} and {} "
                             "overlap!".format(group_idx, insertion_point_indices_vs_group_id[target_idx])
                         )
@@ -1129,7 +1118,7 @@ class QuantizerPropagationSolver:
             op_meta_name = metatype.__class__.__name__
             if len(per_tensor_qconf_list) != len(qconf_list):
                 if not per_tensor_qconf_list:
-                    raise RuntimeError(
+                    raise nncf.InternalError(
                         "Unified scales currently do not support per-channel configuration - dropping"
                         "per-channel configuration options for {} resulted in no valid quantization "
                         "configs!".format(op_meta_name)
@@ -1228,6 +1217,13 @@ class QuantizerPropagationSolver:
         dom_op_quantizers = set()
         for op_node_key in dom_op_node_keys:
             op_node = quant_prop_graph.nodes[op_node_key]
+
+            # Check all branches have a quantizer on it before the merge
+            if op_node["op_meta"].target_input_ports is not None:
+                all_branches_are_quantized = quant_prop_graph.all_outputs_are_quantized(branching_node_key)
+                if not all_branches_are_quantized:
+                    return TransitionStatus.SHOULD_NOT_TRANSITION
+
             trait = op_node[QuantizerPropagationStateGraph.QUANTIZATION_TRAIT_NODE_ATTR]
             affecting_prop_quantizers = op_node[QuantizerPropagationStateGraph.AFFECTING_PROPAGATING_QUANTIZERS_ATTR]
             if affecting_prop_quantizers:
@@ -1388,10 +1384,10 @@ class QuantizerPropagationSolver:
           that would have to remain on the branches (if any).
         """
 
-        if self._propagation_strategy == PropagationStrategy.DO_NOT_MERGE_BRANCH_FQS:
+        if self._propagation_strategy == QuantizerPropagationRule.DO_NOT_MERGE_BRANCHES:
             # Do not merge at all
             return None, potential_qconfigs_for_each_branch
-        if self._propagation_strategy == PropagationStrategy.MERGE_IF_ALL_BRANCH_FQ_OPTIONS_SAME:
+        if self._propagation_strategy == QuantizerPropagationRule.MERGE_IF_ALL_BRANCHES_SAME:
             # Only merge for exact matches of the qconfig lists
             first_pq_list = potential_qconfigs_for_each_branch[0]
             first_pq_list_counter = Counter(first_pq_list)
@@ -1423,12 +1419,12 @@ class QuantizerPropagationSolver:
                 return True
             return False
 
-        if self._propagation_strategy == PropagationStrategy.MERGE_WITH_POTENTIAL_REQUANTIZATION:
+        if self._propagation_strategy == QuantizerPropagationRule.MERGE_WITH_POTENTIAL_REQUANTIZATION:
             compatible_fn = compatible_with_requant
-        elif self._propagation_strategy == PropagationStrategy.MERGE_WITH_SINGLE_FQ_RESULT:
+        elif self._propagation_strategy == QuantizerPropagationRule.MERGE_ALL_IN_ONE:
             compatible_fn = compatible_wo_requant
         else:
-            raise RuntimeError(f"Unknown propagation strategy: {self._propagation_strategy}")
+            raise nncf.ValidationError(f"Unknown propagation strategy: {self._propagation_strategy}")
 
         for qconf in qconfigs_union:
             if all(compatible_fn(qconf, qconf_list) for qconf_list in potential_qconfigs_for_each_branch):
@@ -1457,7 +1453,7 @@ class QuantizerPropagationSolver:
         merged_qconfig_list_counter = Counter(merged_qconfig_list)
         resulting_branch_qconfig_lists = [None for _ in potential_qconfigs_for_each_branch]
 
-        if self._propagation_strategy == PropagationStrategy.MERGE_WITH_POTENTIAL_REQUANTIZATION:
+        if self._propagation_strategy == QuantizerPropagationRule.MERGE_WITH_POTENTIAL_REQUANTIZATION:
             for idx, branch_qconfig_list in enumerate(potential_qconfigs_for_each_branch):
                 if Counter(branch_qconfig_list) == merged_qconfig_list_counter:
                     continue  # This branch will have the branch quantizer removed
@@ -1584,4 +1580,67 @@ class QuantizerPropagationSolver:
         for integer_input_pq in integer_input_pqs:
             quant_prop_graph.remove_propagating_quantizer(integer_input_pq)
 
+        return quant_prop_graph
+
+    def _filter_quantizers_by_metatypes(
+        self, quant_prop_graph: QuantizerPropagationStateGraph, metatypes: List[OperatorMetatype]
+    ) -> QuantizerPropagationStateGraph:
+        """
+        Removes quantizers for which _is_quantizer_to_remove returns True.
+
+        :param quant_prop_graph: The quantizer propagation state graph.
+        :param metatypes: Metatypes are used for the removal criterion.
+        :return: Filtered quantizer propagation state graph.
+        """
+
+        def _is_quantizer_to_remove(
+            quant_prop_graph: QuantizerPropagationStateGraph,
+            quantizer: PropagatingQuantizer,
+            metatypes: List[OperatorMetatype],
+        ) -> bool:
+            """
+            Returns True if the quantizer meets the criteria for removal. The criteria are as follows:
+            1. The quantizer is generated from a node whose metatype is in the provided metatypes.
+            2. The quantizer is not propagated.
+            3. The quantizer has only one child.
+            4. The quantized node generates only one activation quantizer.
+            The function relies on the fact that considered metatypes should have two inputs.
+            In that case, if considered node at InsertionPointGraph has only one input,
+            it means that the another one is a constant.
+
+            :param quant_prop_graph: The quantizer propagation state graph holding the `quantizer`.
+            :param quantizer: The propagating quantizer to be currently considered.
+            :param metatypes: Metatypes are used for the criterion.
+            :return: True if quantizer satisfies the criteria, otherwise - False.
+            """
+            quantizer_children = quantizer.quantized_input_sink_operator_nodes
+            quantized_node_metatype = quant_prop_graph.nodes[quantized_node_key][
+                QuantizerPropagationStateGraph.OPERATOR_METATYPE_NODE_ATTR
+            ]
+            quantizers_generated_for_node = quant_prop_graph.nodes[quantized_node_key][
+                quant_prop_graph.AFFECTING_PROPAGATING_QUANTIZERS_ATTR
+            ]
+
+            is_one_quantizer_generated_for_node = len(quantizers_generated_for_node) == 1
+            is_one_child = len(quantizer_children) == 1
+            is_metatype_to_filter = quantized_node_metatype in metatypes
+            is_quantizer_not_propagated = len(quantizer.propagation_path) <= 1
+
+            return (
+                is_one_child
+                and is_metatype_to_filter
+                and is_one_quantizer_generated_for_node
+                and is_quantizer_not_propagated
+            )
+
+        quantizers = self._finished_propagating_quantizers
+        to_remove_quantizers = []
+        for quantizer in quantizers:
+            quantized_node_key = next(iter(quantizer.quantized_input_sink_operator_nodes))
+            if _is_quantizer_to_remove(quant_prop_graph, quantizer, metatypes):
+                nncf_logger.debug(f"Quantizer generated for a node {quantized_node_key} will be removed.")
+                to_remove_quantizers.append(quantizer)
+        for quantizer in to_remove_quantizers:
+            quant_prop_graph.remove_propagating_quantizer(quantizer)
+            self._finished_propagating_quantizers.remove(quantizer)
         return quant_prop_graph

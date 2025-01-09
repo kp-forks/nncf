@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -11,10 +11,11 @@
 import copy
 from collections import OrderedDict
 from collections import namedtuple
-from typing import Callable, Dict, List, Set, Union
+from typing import Callable, Dict, List, Set, TypeVar, Union
 
 import tensorflow as tf
 
+import nncf
 from nncf.common.graph.model_transformer import ModelTransformer
 from nncf.common.graph.transformations.commands import TargetPoint
 from nncf.common.graph.transformations.commands import TargetType
@@ -36,6 +37,7 @@ from nncf.tensorflow.layers.custom_objects import get_nncf_custom_objects
 from nncf.tensorflow.layers.wrapper import NNCFWrapper
 
 WeightOperations = namedtuple("WeightOperations", ("weights_attr_name", "operations"))
+TModel = TypeVar("TModel")
 
 
 class TFModelTransformer(ModelTransformer):
@@ -43,7 +45,7 @@ class TFModelTransformer(ModelTransformer):
     Applies transformations to a Keras model graph.
     """
 
-    def __init__(self, model):
+    def __init__(self, model: TModel) -> None:
         """
         Initializes Model Transformer
 
@@ -162,7 +164,7 @@ class TFModelTransformer(ModelTransformer):
             for layer in self._model_config["input_layers"]:
                 for tp in target_points:
                     if isinstance(tp, TFBeforeLayer) and tp.layer_name == layer[0]:
-                        raise RuntimeError(f"Insertion before input layer: {tp.layer_name} is not supported")
+                        raise nncf.InternalError(f"Insertion before input layer: {tp.layer_name} is not supported")
 
         layer_configs = []
         for layer in layers_to_insert:
@@ -209,7 +211,7 @@ class TFModelTransformer(ModelTransformer):
                         tp.layer_name, tp.instance_idx, layer_out_ports, replace_layer_name, i
                     )
                     if len(layer_out_ports) > 1:
-                        raise RuntimeError(
+                        raise nncf.InternalError(
                             "Insertion after layer ({}) with multiple ports is not supported".format(tp.layer_name)
                         )
 
@@ -324,7 +326,7 @@ class TFModelTransformer(ModelTransformer):
         if functional_model:
             for layer in self._model_config["input_layers"]:
                 if layer_name == layer[0]:
-                    raise RuntimeError("Insertion before input layer: {} is not supported".format(layer_name))
+                    raise nncf.InternalError("Insertion before input layer: {} is not supported".format(layer_name))
 
         layer_configs = []
         idx, downstream_layer_cfg = self._find_layer_config(layer_name)
@@ -409,13 +411,15 @@ class TFModelTransformer(ModelTransformer):
 
         self._insert_after_model_outputs(layer_name, instance_idx, layer_out_ports, replace_layer_name)
         if len(layer_out_ports) > 1:
-            raise RuntimeError("Insertion after layer ({}) with multiple ports is not supported".format(layer_name))
+            raise nncf.InternalError(
+                "Insertion after layer ({}) with multiple ports is not supported".format(layer_name)
+            )
         self._insert_layer_after_sequential(layer_name, layer_to_insert_config)
 
     def _insert_layer_after_sequential(self, layer_name: str, layer_configs):
         idx, _ = self._find_layer_config(layer_name)
         if idx is None:
-            raise RuntimeError("Layer is not found: {}".format(layer_name))
+            raise nncf.InternalError("Layer is not found: {}".format(layer_name))
         self._model_config["layers"].insert(idx + 1, layer_configs)
 
     @staticmethod

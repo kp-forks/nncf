@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -30,7 +30,6 @@ from examples.torch.common.execution import get_execution_mode
 from examples.torch.common.execution import set_seed
 from examples.torch.common.execution import start_worker
 from examples.torch.common.model_loader import load_model
-from examples.torch.common.utils import SafeMLFLow
 from examples.torch.common.utils import configure_device
 from examples.torch.common.utils import configure_logging
 from examples.torch.common.utils import create_code_snapshot
@@ -38,7 +37,7 @@ from examples.torch.common.utils import get_run_name
 from examples.torch.common.utils import is_pretrained_model_requested
 from examples.torch.common.utils import print_args
 from nncf.config.structures import BNAdaptationInitArgs
-from nncf.experimental.torch.nas.bootstrapNAS import SearchAlgorithm
+from nncf.experimental.torch.nas.bootstrapNAS import BaseSearchAlgorithm
 from nncf.experimental.torch.nas.bootstrapNAS.training.model_creator_helpers import resume_compression_from_state
 from nncf.torch.checkpoint_loading import load_state
 from nncf.torch.initialization import wrap_dataloader_for_init
@@ -93,7 +92,6 @@ def main(argv):
 
 def main_worker(current_gpu, config: SampleConfig):
     configure_device(current_gpu, config)
-    config.mlflow = SafeMLFLow(config)
     if is_main_process():
         configure_logging(logger, config)
         print_args(config)
@@ -151,7 +149,7 @@ def main_worker(current_gpu, config: SampleConfig):
         top1_acc = validate_model_fn_top1(model, val_loader)
         logger.info("SuperNetwork Top 1: {top1_acc}".format(top1_acc=top1_acc))
 
-        search_algo = SearchAlgorithm.from_config(model, elasticity_ctrl, nncf_config)
+        search_algo = BaseSearchAlgorithm.from_config(model, elasticity_ctrl, nncf_config)
 
         elasticity_ctrl, best_config, performance_metrics = search_algo.run(
             validate_model_fn_top1, val_loader, config.checkpoint_save_dir, tensorboard_writer=config.tb

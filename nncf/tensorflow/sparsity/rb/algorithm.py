@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2024 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -15,6 +15,7 @@ import numpy as np
 import tensorflow as tf
 
 from nncf import NNCFConfig
+from nncf.api.compression import CompressionStage
 from nncf.common.accuracy_aware_training.training_loop import ADAPTIVE_COMPRESSION_CONTROLLERS
 from nncf.common.graph.transformations.commands import TransformationPriority
 from nncf.common.schedulers import StubCompressionScheduler
@@ -150,6 +151,12 @@ class RBSparsityController(BaseSparsityController):
     def set_sparsity_level(self, sparsity_level):
         self._loss.set_target_sparsity_loss(sparsity_level)
 
+    @property
+    def current_sparsity_level(self) -> float:
+        # TODO: align with torch where it currently shows the sparsity level as reported by loss object.
+        #  TF does not seem to have this functionality in its SparseLoss right now.
+        return self.scheduler.current_sparsity_level
+
     def freeze(self):
         self._loss.disable()
 
@@ -184,3 +191,6 @@ class RBSparsityController(BaseSparsityController):
 
     def disable_scheduler(self):
         self._scheduler = StubCompressionScheduler()
+
+    def compression_stage(self) -> CompressionStage:
+        return None  # Issue-160174

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -19,23 +19,22 @@ import torch
 from torch import nn
 
 from nncf import Dataset
-from nncf import NNCFConfig
 from nncf.common.graph.transformations.commands import TargetType
-from nncf.common.quantization.structs import QuantizationMode
 from nncf.common.quantization.structs import QuantizationPreset
+from nncf.common.quantization.structs import QuantizationScheme as QuantizationMode
 from nncf.common.quantization.structs import QuantizerConfig
 from nncf.common.quantization.structs import QuantizerGroup
-from nncf.experimental.tensor import Tensor
-from nncf.experimental.tensor import functions as fn
+from nncf.experimental.common.tensor_statistics.statistics import MinMaxTensorStatistic
 from nncf.quantization.algorithms.min_max.algorithm import MinMaxQuantization
 from nncf.quantization.algorithms.min_max.torch_backend import PTMinMaxAlgoBackend
 from nncf.quantization.fake_quantize import FakeQuantizeParameters
 from nncf.quantization.fake_quantize import calculate_quantizer_parameters
 from nncf.quantization.fake_quantize import get_quantizer_narrow_range
-from nncf.torch.model_creation import create_nncf_network
+from nncf.tensor import Tensor
+from nncf.tensor import functions as fns
+from nncf.torch.model_creation import wrap_model
 from nncf.torch.statistics.aggregator import PTStatisticsAggregator
-from nncf.torch.tensor_statistics.statistics import PTMinMaxTensorStatistic
-from tests.post_training.test_templates.test_calculate_quantizer_parameters import TemplateTestFQParams
+from tests.cross_fw.test_templates.test_calculate_quantizer_parameters import TemplateTestFQParams
 from tests.torch.helpers import get_all_inputs_for_graph_node
 from tests.torch.helpers import get_nodes_by_type
 
@@ -211,8 +210,8 @@ def test_quantizer_params_asym(case_to_test: CaseSymParams):
     )
     quantizer = PTMinMaxAlgoBackend._create_quantizer(qconfig, scale_shape, fq_params, target_type)
     assert quantizer.levels == fq_params.levels
-    assert fn.allclose(quantizer.input_low.data, case_to_test.ref_inp_low)
-    assert fn.allclose(quantizer.input_range.data, case_to_test.ref_inp_range)
+    assert fns.allclose(quantizer.input_low.data, case_to_test.ref_inp_low)
+    assert fns.allclose(quantizer.input_range.data, case_to_test.ref_inp_range)
 
 
 class LinearTestModel(nn.Module):
@@ -269,7 +268,9 @@ def calculate_statistics(data, mode, qgroup, half_range=False):
     else:
         max_values = np.amax(data, axes)
 
-    statistics = PTMinMaxTensorStatistic(min_values=torch.tensor(min_values), max_values=torch.tensor(max_values))
+    statistics = MinMaxTensorStatistic(
+        min_values=Tensor(torch.tensor(min_values)), max_values=Tensor(torch.tensor(max_values))
+    )
     signedness_to_force = True if qgroup == QuantizerGroup.WEIGHTS else None
     qconfig = QuantizerConfig(num_bits=8, mode=mode, per_channel=per_ch, signedness_to_force=signedness_to_force)
     narrow_range = get_quantizer_narrow_range(qconfig, qgroup)
@@ -290,17 +291,17 @@ def calculate_fq_params(model, input_data):
     conv2_w_stats = calculate_statistics(conv2_w, QuantizationMode.SYMMETRIC, QuantizerGroup.WEIGHTS)
     return {
         "//nncf_model_input_0|OUTPUT/FakeQuantize": conv1_stats,
-        "/bn1/LinearTestModel/NNCFBatchNorm2d[bn1]/batch_norm_0|INPUT0/FakeQuantize": bn1_stats,
+        "/bn1/LinearTestModel/BatchNorm2d[bn1]/batch_norm_0|INPUT0/FakeQuantize": bn1_stats,
         "/avg_pool/LinearTestModel/AdaptiveAvgPool2d[avg_pool]/adaptive_avg_pool2d_0|INPUT0/FakeQuantize": (
             avg_pool_stats
         ),
-        "/conv2/LinearTestModel/NNCFConv2d[conv2]/conv2d_0|INPUT0/FakeQuantize": conv2_stats,
-        "/conv1/pre_ops.0/op/FakeQuantize": conv1_w_stats,
-        "/conv2/pre_ops.0/op/FakeQuantize": conv2_w_stats,
+        "/conv2/LinearTestModel/Conv2d[conv2]/conv2d_0|INPUT0/FakeQuantize": conv2_stats,
+        "/conv1/LinearTestModel/Conv2d[conv1]/conv2d_0|INPUT1/FakeQuantize": conv1_w_stats,
+        "/conv2/LinearTestModel/Conv2d[conv2]/conv2d_0|INPUT1/FakeQuantize": conv2_w_stats,
     }
 
 
-def test_quantizer_parameters_export(tmp_path: Path):
+def test_quantizer_parameters_export(tmp_path: Path, _seed):
     model = LinearTestModel()
     model.eval().cpu()
 
@@ -312,8 +313,7 @@ def test_quantizer_parameters_export(tmp_path: Path):
     min_max_algo = MinMaxQuantization(subset_size=1, preset=QuantizationPreset.PERFORMANCE, inplace_statistics=False)
     statistics_aggregator = PTStatisticsAggregator(dataset)
 
-    nncf_config = NNCFConfig({"input_info": {"sample_size": [1, 3, 32, 32]}})
-    nncf_network = create_nncf_network(model, nncf_config)
+    nncf_network = wrap_model(model, torch.ones([1, 3, 32, 32]), True)
     statistic_points = min_max_algo.get_statistic_points(nncf_network, nncf_network.nncf.get_graph())
     statistics_aggregator.register_statistic_points(statistic_points)
     statistics_aggregator.collect_statistics(model, nncf_network.nncf.get_graph())
@@ -342,11 +342,10 @@ def test_quantizer_parameters_export(tmp_path: Path):
 
     for name, param in fq_params.items():
         assert name in torch_ptq_params
-        assert fn.allclose(param["input_low"], torch_ptq_params[name]["input_low"])
-        assert fn.allclose(param["input_high"], torch_ptq_params[name]["input_high"])
+        assert fns.allclose(param["input_low"], torch_ptq_params[name]["input_low"])
+        assert fns.allclose(param["input_high"], torch_ptq_params[name]["input_high"])
 
 
 class TestFQParams(TemplateTestFQParams):
-    @property
-    def tensor_statistic(self):
-        return PTMinMaxTensorStatistic
+    def to_nncf_tensor(self, t):
+        return Tensor(torch.tensor(t))

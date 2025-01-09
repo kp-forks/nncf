@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -147,7 +147,7 @@ class GlobalLRScheduler(BaseLRScheduler):
         base_lr: float,
         num_epochs: float,
         warmup_epochs: float = 0,
-        warmup_lr: float = 3.4e-4
+        warmup_lr: float = 3.4e-4,
     ):
         super().__init__(optimizer, num_steps_in_epoch)
         self._base_lr = base_lr

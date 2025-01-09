@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -13,18 +13,20 @@ from copy import deepcopy
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
+import nncf
 from nncf.common.graph import NNCFNode
 from nncf.common.graph import NNCFNodeName
 from nncf.common.utils.api_marker import api
 from nncf.config.schemata.defaults import QUANTIZATION_BITS
 from nncf.config.schemata.defaults import QUANTIZATION_PER_CHANNEL
+from nncf.parameters import StrEnum
 from nncf.parameters import TargetDevice
 
 
 @api()
-class QuantizationMode:
+class QuantizationScheme:
     """
-    Basic enumeration for quantization mode specification.
+    Basic enumeration for quantization scheme specification.
 
     :param SYMMETRIC:
     :param ASYMMETRIC:
@@ -43,7 +45,7 @@ class QuantizerConfig:
     def __init__(
         self,
         num_bits: int = QUANTIZATION_BITS,
-        mode: QuantizationMode = QuantizationMode.SYMMETRIC,
+        mode: QuantizationScheme = QuantizationScheme.SYMMETRIC,
         signedness_to_force: Optional[bool] = None,
         per_channel: bool = QUANTIZATION_PER_CHANNEL,
     ):
@@ -66,7 +68,7 @@ class QuantizerConfig:
     def __str__(self):
         return "B:{bits} M:{mode} SGN:{signedness} PC:{per_channel}".format(
             bits=self.num_bits,
-            mode="S" if self.mode == QuantizationMode.SYMMETRIC else "A",
+            mode="S" if self.mode == QuantizationScheme.SYMMETRIC else "A",
             signedness="ANY" if self.signedness_to_force is None else ("S" if self.signedness_to_force else "U"),
             per_channel="Y" if self.per_channel else "N",
         )
@@ -86,7 +88,7 @@ class QuantizerConfig:
         """
         fail_conditions = [
             self.num_bits > other.num_bits,
-            self.mode is QuantizationMode.ASYMMETRIC and other.mode is QuantizationMode.SYMMETRIC,
+            self.mode is QuantizationScheme.ASYMMETRIC and other.mode is QuantizationScheme.SYMMETRIC,
             self.signedness_to_force is None and other.signedness_to_force is not None,
             self.signedness_to_force is True and other.signedness_to_force is False,
         ]
@@ -153,7 +155,7 @@ class QuantizerSpec:
     """
 
     def __init__(
-        self, num_bits: int, mode: QuantizationMode, signedness_to_force: bool, narrow_range: bool, half_range: bool
+        self, num_bits: int, mode: QuantizationScheme, signedness_to_force: bool, narrow_range: bool, half_range: bool
     ):
         """
         :param num_bits: Bitwidth of the quantization.
@@ -193,7 +195,9 @@ class QuantizationConstraints:
         """
         for attr_name in kwargs:
             if not hasattr(QuantizationConstraints.REF_QCONF_OBJ, attr_name):
-                raise RuntimeError("Invalid constraint - QuantizerConfig has no attribute '{}'".format(attr_name))
+                raise nncf.ValidationError(
+                    "Invalid constraint - QuantizerConfig has no attribute '{}'".format(attr_name)
+                )
         self.qconf_attr_vs_constraint_dict = kwargs
 
     def apply_constraints_to(self, qconfig: QuantizerConfig) -> QuantizerConfig:
@@ -203,13 +207,12 @@ class QuantizationConstraints:
         return qconfig
 
     def is_config_compatible(self, qconfig: QuantizerConfig) -> bool:
-        is_compatible = True
         for attr_name, constraint in self.qconf_attr_vs_constraint_dict.items():
             if constraint is not None:
                 qconf_attr_value = getattr(qconfig, attr_name)
                 if qconf_attr_value != constraint:
-                    is_compatible = False
-        return is_compatible
+                    return False
+        return True
 
     def get_updated_constraints(self, overriding_constraints: "QuantizationConstraints") -> "QuantizationConstraints":
         new_dict = deepcopy(self.qconf_attr_vs_constraint_dict)
@@ -324,7 +327,7 @@ class UnifiedScaleType(Enum):
 
 
 @api(canonical_alias="nncf.QuantizationPreset")
-class QuantizationPreset(Enum):
+class QuantizationPreset(StrEnum):
     """
     An enum with values corresponding to the available quantization presets.
     """
@@ -334,5 +337,5 @@ class QuantizationPreset(Enum):
 
     def get_params_configured_by_preset(self, quant_group: QuantizerGroup) -> Dict:
         if quant_group == QuantizerGroup.ACTIVATIONS and self == QuantizationPreset.MIXED:
-            return {"mode": QuantizationMode.ASYMMETRIC}
-        return {"mode": QuantizationMode.SYMMETRIC}
+            return {"mode": QuantizationScheme.ASYMMETRIC}
+        return {"mode": QuantizationScheme.SYMMETRIC}

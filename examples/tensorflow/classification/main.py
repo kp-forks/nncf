@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -14,8 +14,8 @@ import sys
 from pathlib import Path
 
 import tensorflow as tf
-import tensorflow_addons as tfa
 
+import nncf
 from examples.common.paths import configure_paths
 from examples.common.sample_config import create_sample_config
 from examples.tensorflow.classification.datasets.builder import DatasetBuilder
@@ -112,7 +112,7 @@ def load_checkpoint(checkpoint, ckpt_path):
     if not path_to_checkpoint:
         logger.info("No checkpoint detected.")
         if ckpt_path:
-            raise RuntimeError(f"ckpt_path was given, but no checkpoint detected in path: {ckpt_path}")
+            raise nncf.ValidationError(f"ckpt_path was given, but no checkpoint detected in path: {ckpt_path}")
 
     logger.info("Checkpoint file {} found and restoring from checkpoint".format(path_to_checkpoint))
 
@@ -198,8 +198,8 @@ def run(config):
             metrics = [
                 tf.keras.metrics.CategoricalAccuracy(name="acc@1"),
                 tf.keras.metrics.TopKCategoricalAccuracy(k=5, name="acc@5"),
-                tfa.metrics.MeanMetricWrapper(loss_obj, name="ce_loss"),
-                tfa.metrics.MeanMetricWrapper(compression_ctrl.loss, name="cr_loss"),
+                tf.keras.metrics.MeanMetricWrapper(loss_obj, name="ce_loss"),
+                tf.keras.metrics.MeanMetricWrapper(compression_ctrl.loss, name="cr_loss"),
             ]
 
             compress_model.compile(

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -8,10 +8,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import ctypes
 import functools
 import json
+import math
 import os
 import os.path as osp
 from collections import OrderedDict
@@ -148,7 +148,7 @@ class QuantizationEnv:
 
         # Check and only proceed if target device is supported by Q.Env
         self.hw_cfg_type = hw_config_type
-        assert self.hw_cfg_type in [None, HWConfigType.VPU]
+        assert self.hw_cfg_type in [None, HWConfigType.NPU]
 
         # Set target compression ratio
         self.compression_ratio = params.compression_ratio
@@ -170,7 +170,7 @@ class QuantizationEnv:
         # Configure search space for precision according to target device
         if self.hw_cfg_type is None:
             self.model_bitwidth_space = params.bits
-        elif self.hw_cfg_type is HWConfigType.VPU:
+        elif self.hw_cfg_type is HWConfigType.NPU:
             self.model_bitwidth_space = self._hw_precision_constraints.get_all_unique_bitwidths()
         self.model_bitwidth_space = sorted(list(self.model_bitwidth_space))
 
@@ -179,7 +179,7 @@ class QuantizationEnv:
             self.qctrl.all_quantizations.keys()
         )
         if self.hw_cfg_type is None:
-            for qid in self.qconfig_space_map.keys():
+            for qid in self.qconfig_space_map:
                 conf = self.qctrl.all_quantizations[qid].get_quantizer_config()
                 conf_list_to_set = []
                 for bit in self.model_bitwidth_space:
@@ -520,7 +520,7 @@ class QuantizationEnv:
 
     def reward(self, acc: float, model_ratio: float) -> float:
         def order_of_magnitude(number):
-            return np.floor(np.math.log(abs(number), 10))
+            return np.floor(math.log(abs(number), 10))
 
         if self.pretrained_score == 0:
             return acc

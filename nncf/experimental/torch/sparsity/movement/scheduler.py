@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -97,16 +97,16 @@ class MovementSchedulerParams:
         :param params: A dict that specifies the parameters of movement sparsity scheduler.
         :return: A `MovementSchedulerParams` object that stores the parameters from `params`.
         """
-        warmup_start_epoch: int = params.get("warmup_start_epoch", None)
-        warmup_end_epoch: int = params.get("warmup_end_epoch", None)
-        importance_regularization_factor: float = params.get("importance_regularization_factor", None)
+        warmup_start_epoch: int = params.get("warmup_start_epoch")
+        warmup_end_epoch: int = params.get("warmup_end_epoch")
+        importance_regularization_factor: float = params.get("importance_regularization_factor")
         enable_structured_masking: bool = params.get("enable_structured_masking", MOVEMENT_ENABLE_STRUCTURED_MASKING)
-        init_importance_threshold: Optional[float] = params.get("init_importance_threshold", None)
+        init_importance_threshold: Optional[float] = params.get("init_importance_threshold")
         final_importance_threshold: float = params.get(
             "final_importance_threshold", MOVEMENT_FINAL_IMPORTANCE_THRESHOLD
         )
         power: float = params.get("power", MOVEMENT_POWER)
-        steps_per_epoch: Optional[int] = params.get("steps_per_epoch", None)
+        steps_per_epoch: Optional[int] = params.get("steps_per_epoch")
 
         if None in [warmup_start_epoch, warmup_end_epoch, importance_regularization_factor]:
             raise ValueError(
@@ -315,12 +315,15 @@ class MovementPolynomialThresholdScheduler(BaseCompressionScheduler):
         if self._steps_per_epoch is None and self._steps_in_current_epoch > 0:
             self._steps_per_epoch = self._steps_in_current_epoch
 
-        if self._steps_per_epoch is not None and self._steps_in_current_epoch > 0:
-            if self._steps_per_epoch != self._steps_in_current_epoch:
-                raise Exception(
-                    "Actual steps per epoch and steps per epoch from the scheduler "
-                    "parameters are different. Scheduling may be incorrect."
-                )
+        if (
+            self._steps_per_epoch is not None
+            and self._steps_in_current_epoch > 0
+            and self._steps_per_epoch != self._steps_in_current_epoch
+        ):
+            raise Exception(
+                "Actual steps per epoch and steps per epoch from the scheduler "
+                "parameters are different. Scheduling may be incorrect."
+            )
 
         if self._steps_per_epoch is None:
             self._should_skip = True

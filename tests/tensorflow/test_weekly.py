@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -16,7 +16,7 @@ import tempfile
 import pytest
 from pytest import approx
 
-from tests.shared.paths import PROJECT_ROOT
+from tests.cross_fw.shared.paths import PROJECT_ROOT
 from tests.tensorflow.test_sanity_sample import get_sample_fn
 
 EXAMPLES_DIR = PROJECT_ROOT.joinpath("examples", "tensorflow")

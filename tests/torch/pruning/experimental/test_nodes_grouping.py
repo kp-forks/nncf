@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -19,7 +19,7 @@ from torch import nn
 
 from nncf import NNCFConfig
 from nncf.torch.model_creation import create_nncf_network
-from tests.shared.nx_graph import compare_nx_graph_with_reference
+from tests.cross_fw.shared.nx_graph import compare_nx_graph_with_reference
 from tests.torch.test_compressed_graph import GeneralModelDesc
 from tests.torch.test_compressed_graph import IModelDesc
 from tests.torch.test_compressed_graph import get_full_path_to_the_graph
@@ -179,22 +179,22 @@ NLP_DESCS = [
     GroupTestDesc(
         model_desc=GeneralModelDesc(
             model_name="1_layer_BERT",
-            input_info=[dict(sample_size=[1, 10], type="long")] * 3,
+            input_info=[dict(sample_size=[1, 10], type="long")],
             model_builder=partial(AutoModelForQuestionAnswering.from_config, BertConfig(num_hidden_layers=1)),
         ),
         ref_groups=[
             PruningGroup(
                 block=PruningBlock(size=64, offset=0),
-                producers={ProducerInfo(12), ProducerInfo(15), ProducerInfo(11)},
-                consumers={ConsumerInfo(30)},
+                producers={ProducerInfo(11), ProducerInfo(14), ProducerInfo(10)},
+                consumers={ConsumerInfo(29)},
             ),
-            PruningGroup(block=PruningBlock(), producers={ProducerInfo(34)}, consumers={ConsumerInfo(36)}),
+            PruningGroup(block=PruningBlock(), producers={ProducerInfo(33)}, consumers={ConsumerInfo(35)}),
         ],
     ),
     GroupTestDesc(
         model_desc=GeneralModelDesc(
             model_name="larger_BERT",
-            input_info=[dict(sample_size=[1, 128], type="long")] * 4,
+            input_info=[dict(sample_size=[1, 128], type="long")],
             model_builder=partial(
                 AutoModelForSequenceClassification.from_config,
                 BertConfig(
@@ -214,26 +214,26 @@ NLP_DESCS = [
         ref_groups=[
             PruningGroup(
                 block=PruningBlock(size=2, offset=0),
-                producers={ProducerInfo(12), ProducerInfo(13), ProducerInfo(16)},
-                consumers={ConsumerInfo(31)},
+                producers={ProducerInfo(10), ProducerInfo(11), ProducerInfo(14)},
+                consumers={ConsumerInfo(29)},
             ),
-            PruningGroup(block=PruningBlock(), producers={ProducerInfo(35)}, consumers={ConsumerInfo(37)}),
-            PruningGroup(block=PruningBlock(), producers={ProducerInfo(42)}, consumers={ConsumerInfo(45)}),
+            PruningGroup(block=PruningBlock(), producers={ProducerInfo(33)}, consumers={ConsumerInfo(35)}),
+            PruningGroup(block=PruningBlock(), producers={ProducerInfo(40)}, consumers={ConsumerInfo(43)}),
         ],
     ),
     GroupTestDesc(
         model_desc=GeneralModelDesc(
             model_name="RoBERTa",
-            input_info=[dict(sample_size=[1, 10], type="long")] * 3,
+            input_info=[dict(sample_size=[1, 10], type="long")],
             model_builder=partial(AutoModelForQuestionAnswering.from_config, RobertaConfig(num_hidden_layers=1)),
         ),
         ref_groups=[
             PruningGroup(
                 block=PruningBlock(size=64, offset=0),
-                producers={ProducerInfo(20), ProducerInfo(23), ProducerInfo(19)},
-                consumers={ConsumerInfo(38)},
+                producers={ProducerInfo(19), ProducerInfo(22), ProducerInfo(18)},
+                consumers={ConsumerInfo(37)},
             ),
-            PruningGroup(block=PruningBlock(), producers={ProducerInfo(42)}, consumers={ConsumerInfo(44)}),
+            PruningGroup(block=PruningBlock(), producers={ProducerInfo(41)}, consumers={ConsumerInfo(43)}),
         ],
     ),
     GroupTestDesc(
@@ -264,7 +264,7 @@ NLP_DESCS = [
     GroupTestDesc(
         model_desc=GeneralModelDesc(
             model_name="MobileBERT",
-            input_info=[dict(sample_size=[1, 128], type="long")] * 4,
+            input_info=[dict(sample_size=[1, 128], type="long")],
             model_builder=partial(
                 AutoModelForSequenceClassification.from_config,
                 MobileBertConfig(
@@ -285,28 +285,28 @@ NLP_DESCS = [
             PruningGroup(
                 block=PruningBlock(),
                 producers={
-                    ProducerInfo(19),
-                    ProducerInfo(44),
-                    ProducerInfo(50),
-                    ProducerInfo(56),
-                    ProducerInfo(62),
-                    ProducerInfo(68),
+                    ProducerInfo(17),
+                    ProducerInfo(42),
+                    ProducerInfo(48),
+                    ProducerInfo(54),
+                    ProducerInfo(60),
+                    ProducerInfo(66),
                 },
-                consumers={ConsumerInfo(66), ConsumerInfo(48), ConsumerInfo(60), ConsumerInfo(72), ConsumerInfo(54)},
+                consumers={ConsumerInfo(64), ConsumerInfo(46), ConsumerInfo(58), ConsumerInfo(70), ConsumerInfo(52)},
             ),
             PruningGroup(
                 block=PruningBlock(size=64, offset=0),
-                producers={ProducerInfo(25), ProducerInfo(26), ProducerInfo(27)},
-                consumers={ConsumerInfo(44)},
+                producers={ProducerInfo(23), ProducerInfo(24), ProducerInfo(25)},
+                consumers={ConsumerInfo(42)},
             ),
             PruningGroup(
-                block=PruningBlock(), producers={ProducerInfo(22)}, consumers={ConsumerInfo(25), ConsumerInfo(26)}
+                block=PruningBlock(), producers={ProducerInfo(20)}, consumers={ConsumerInfo(23), ConsumerInfo(24)}
             ),
-            PruningGroup(block=PruningBlock(), producers={ProducerInfo(48)}, consumers={ConsumerInfo(50)}),
-            PruningGroup(block=PruningBlock(), producers={ProducerInfo(54)}, consumers={ConsumerInfo(56)}),
-            PruningGroup(block=PruningBlock(), producers={ProducerInfo(60)}, consumers={ConsumerInfo(62)}),
-            PruningGroup(block=PruningBlock(), producers={ProducerInfo(66)}, consumers={ConsumerInfo(68)}),
-            PruningGroup(block=PruningBlock(), producers={ProducerInfo(78)}, consumers={ConsumerInfo(81)}),
+            PruningGroup(block=PruningBlock(), producers={ProducerInfo(46)}, consumers={ConsumerInfo(48)}),
+            PruningGroup(block=PruningBlock(), producers={ProducerInfo(52)}, consumers={ConsumerInfo(54)}),
+            PruningGroup(block=PruningBlock(), producers={ProducerInfo(58)}, consumers={ConsumerInfo(60)}),
+            PruningGroup(block=PruningBlock(), producers={ProducerInfo(64)}, consumers={ConsumerInfo(66)}),
+            PruningGroup(block=PruningBlock(), producers={ProducerInfo(76)}, consumers={ConsumerInfo(79)}),
         ],
     ),
 ]
@@ -409,10 +409,10 @@ CV_DESCS = [
         ref_groups=[
             PruningGroup(
                 block=PruningBlock(size=2, offset=0),
-                producers={ProducerInfo(9), ProducerInfo(15), ProducerInfo(11)},
-                consumers={ConsumerInfo(33)},
+                producers={ProducerInfo(10), ProducerInfo(16), ProducerInfo(12)},
+                consumers={ConsumerInfo(34)},
             ),
-            PruningGroup(block=PruningBlock(), producers={ProducerInfo(36)}, consumers={ConsumerInfo(40)}),
+            PruningGroup(block=PruningBlock(), producers={ProducerInfo(37)}, consumers={ConsumerInfo(41)}),
         ],
     ),
     GroupTestDesc(
@@ -436,13 +436,13 @@ CV_DESCS = [
 AUDIO_DESCS = [
     GroupTestDesc(
         model_desc=GeneralModelDesc(
-            model_name="Wave2Vec 2.0",
+            model_name="Wave2Vec_2.0",
             input_info=dict(sample_size=[1, 400]),
             model_builder=partial(
                 AutoModelForAudioClassification.from_config,
                 Wav2Vec2Config(
                     vocab_size=2,
-                    hidden_size=16,
+                    hidden_size=48,
                     num_hidden_layers=1,
                     num_attention_heads=2,
                     intermediate_size=4,
@@ -452,7 +452,7 @@ AUDIO_DESCS = [
         ),
         ref_groups=[
             PruningGroup(
-                block=PruningBlock(size=8, offset=0),
+                block=PruningBlock(size=24, offset=0),
                 producers={ProducerInfo(31), ProducerInfo(29), ProducerInfo(35)},
                 consumers={ConsumerInfo(53)},
             ),
@@ -488,14 +488,14 @@ def test_groups(desc: GroupTestDesc, mocker, tmp_path):
 BIG_MODEL_DESCS = [
     GroupTestDesc(
         model_desc=GeneralModelDesc(
-            model_name="MobileBERT big",
+            model_name="MobileBERT_big",
             input_info=[dict(sample_size=[1, 128], type="long")] * 4,
             model_builder=get_mobile_bert_big_model,
         ),
     ),
     GroupTestDesc(
         model_desc=GeneralModelDesc(
-            model_name="Swin big",
+            model_name="Swin_big",
             input_info=dict(sample_size=[1, 3, 224, 224]),
             model_builder=get_swin_tiny_model,
         )

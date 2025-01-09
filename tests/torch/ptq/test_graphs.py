@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -13,16 +13,20 @@ from functools import partial
 from pathlib import Path
 
 import pytest
+import torch
 
+from nncf import Dataset
+from nncf.parameters import ModelType
 from nncf.parameters import TargetDevice
 from nncf.quantization.advanced_parameters import AdvancedQuantizationParameters
 from nncf.quantization.algorithms.post_training.algorithm import PostTrainingQuantization
+from nncf.torch import wrap_model
 from nncf.torch.layers import NNCF_RNN
 from nncf.torch.layers import LSTMCellNNCF
-from tests.post_training.test_templates.helpers import EmbeddingModel
+from tests.cross_fw.test_templates.helpers import EmbeddingModel
+from tests.cross_fw.test_templates.helpers import RoPEModel
+from tests.cross_fw.test_templates.helpers import ScaledDotProductAttentionModel
 from tests.torch import test_models
-from tests.torch.ptq.helpers import get_nncf_network
-from tests.torch.ptq.helpers import mock_collect_statistics
 from tests.torch.quantization.test_algo_quantization import SharedLayersModel
 from tests.torch.test_compressed_graph import ModelDesc
 from tests.torch.test_compressed_graph import check_graph
@@ -48,6 +52,15 @@ def get_model_name(description):
 
 TEST_MODELS_DESC = [
     (ModelDesc("embedding_model", EmbeddingModel, [1, 10]), {}),
+    (ModelDesc("rope_model", RoPEModel, [1, 10]), {"model_type": ModelType.TRANSFORMER}),
+    (
+        ModelDesc(
+            "scaled_dot_product_attention_model",
+            ScaledDotProductAttentionModel,
+            {"query": [1, 8, 16], "key": [1, 8, 16], "value": [1, 8, 16]},
+        ),
+        {},
+    ),
     (ModelDesc("shared_model", SharedLayersModel, [1, 1, 5, 6]), {}),
     (ModelDesc("alexnet", test_models.AlexNet, [1, 3, 32, 32]), {}),
     (ModelDesc("lenet", test_models.LeNet, [1, 3, 32, 32]), {}),
@@ -93,13 +106,23 @@ TEST_MODELS_DESC = [
     ("desc", "quantization_parameters"), TEST_MODELS_DESC, ids=[get_model_name(m) for m in TEST_MODELS_DESC]
 )
 def test_min_max_classification_quantized_graphs(desc: ModelDesc, quantization_parameters, graph_dir, mocker):
-    mock_collect_statistics(mocker)
     model = desc.model_builder()
 
-    nncf_network = get_nncf_network(model, desc.input_sample_sizes)
+    if isinstance(desc.input_sample_sizes, dict):
+        example_input = {}
+        for name, size in desc.input_sample_sizes.items():
+            example_input[name] = torch.ones(size)
+    else:
+        example_input = torch.ones(desc.input_sample_sizes)
+
+    nncf_network = wrap_model(model, example_input, trace_parameters=True)
     quantization_parameters["advanced_parameters"] = AdvancedQuantizationParameters(disable_bias_correction=True)
+    quantization_parameters["subset_size"] = 1
     quantization_algorithm = PostTrainingQuantization(**quantization_parameters)
 
-    quantized_model = quantization_algorithm.apply(nncf_network, nncf_network.nncf.get_graph(), dataset=None)
-
-    check_graph(quantized_model.nncf.get_graph(), desc.dot_filename, graph_dir)
+    quantized_model = quantization_algorithm.apply(
+        nncf_network,
+        nncf_network.nncf.get_graph(),
+        dataset=Dataset([example_input]),
+    )
+    check_graph(quantized_model.nncf.get_graph(), desc.dot_filename(), graph_dir)

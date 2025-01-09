@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -17,7 +17,7 @@ from typing import Callable, Type, TypeVar
 from packaging import version
 
 
-def warning_deprecated(msg):
+def warning_deprecated(msg: str) -> None:
     # Note: must use FutureWarning in order not to get suppressed by default
     warnings.warn(msg, FutureWarning, stacklevel=2)
 

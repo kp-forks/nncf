@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -9,7 +9,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Tuple, TypeVar
+from typing import Callable, List, Tuple, TypeVar
 
 from nncf.common.factory import CommandCreatorFactory
 from nncf.common.factory import ModelTransformerFactory
@@ -17,6 +17,7 @@ from nncf.common.graph import NNCFGraph
 from nncf.common.graph import NNCFNode
 from nncf.common.graph.operator_metatypes import OperatorMetatype
 from nncf.common.graph.transformations.layout import TransformationLayout
+from nncf.quantization.advanced_parameters import RestoreMode
 
 TModel = TypeVar("TModel")
 
@@ -49,15 +50,32 @@ def find_quantizer_nodes_to_cut(
     """
 
     def _parse_node_relatives(node: NNCFNode, is_parents: bool):
-        if node.metatype in quantizable_metatypes:
-            ops_to_return_in_orig_prec.add(node)
-
         relatives = graph.get_previous_nodes(node) if is_parents else graph.get_next_nodes(node)
         for relative in relatives:
-            if relative.metatype in quantizer_metatypes:
+            if relative.metatype in quantizable_metatypes:
                 if is_parents:
                     if relative in seen_children:
                         continue
+                    to_see_children.append(relative)
+                else:
+                    ops_to_return_in_orig_prec.add(relative)
+                    if relative not in seen_parents:
+                        to_see_parents.append(relative)
+            elif relative.metatype in quantizer_metatypes:
+                if is_parents:
+                    if relative in seen_children:
+                        continue
+                    if relative not in to_cut:
+                        to_cut.append(relative)
+                    to_see_children.append(relative)
+                    # We should see parents for the `relative` node here only if they are
+                    # all quantizers. This covers the quantize-dequantize case, where we
+                    # should see parents for the dequantize node.
+                    if all(x.metatype in quantizer_metatypes for x in graph.get_previous_nodes(relative)):
+                        to_see_parents.append(relative)
+                elif node.metatype in quantizer_metatypes:
+                    # `node` is a quantizer (quantize-dequantize case) here, and `relative`
+                    # is the dequantizer. So, we should cut `relative` and look at its children.
                     if relative not in to_cut:
                         to_cut.append(relative)
                     to_see_children.append(relative)
@@ -87,7 +105,14 @@ def find_quantizer_nodes_to_cut(
 
 
 def revert_operations_to_floating_point_precision(
-    operations: List[NNCFNode], quantizers: List[NNCFNode], quantized_model: TModel, quantized_model_graph: NNCFGraph
+    operations: List[NNCFNode],
+    quantizers: List[NNCFNode],
+    quantized_model: TModel,
+    quantized_model_graph: NNCFGraph,
+    restore_mode: RestoreMode,
+    op_with_weights_metatypes: List[OperatorMetatype],
+    is_node_with_weight_fn: Callable[[NNCFNode], bool],
+    get_weight_tensor_port_ids_fn: Callable[[NNCFNode], List[int]],
 ) -> TModel:
     """
     Reverts provided operations to floating-point precision by removing
@@ -100,14 +125,36 @@ def revert_operations_to_floating_point_precision(
     :param quantized_model: Quantized model in which provided operations
         should be reverted to floating-point precision.
     :param quantized_model_graph: The graph which was built for `quantized_model`.
+    :param restore_mode: Restore mode.
+    :param op_with_weights_metatypes: List of operation metatypes that can be reverted to representation
+        with int8 weights.
+    :param is_node_with_weight_fn: Checks if the node has a weight or not. Returns `True` if `node` corresponds
+        to the operation with weights, `False` otherwise.
+    :param get_weight_tensor_port_ids_fn: Returns node's input port indices with weights tensors.
     :return: The model where `operations` were reverted to floating-point precision.
     """
     transformation_layout = TransformationLayout()
 
     command_creator = CommandCreatorFactory.create(quantized_model)
 
+    should_remove_fq = {}
+    should_revert_weights_to_fp32 = {}
+    if restore_mode == RestoreMode.ONLY_ACTIVATIONS:
+        for node in operations:
+            if (
+                node.metatype in op_with_weights_metatypes
+                and node.layer_attributes
+                and node.layer_attributes.constant_attributes
+            ):
+                input_edges = quantized_model_graph.get_input_edges(node)
+                for port_id in node.layer_attributes.get_const_port_ids():
+                    fq_weight = input_edges[port_id].from_node
+                    should_remove_fq[fq_weight.node_name] = False
+                    should_revert_weights_to_fp32[node.node_name] = False
+
     for node in quantizers:
-        transformation_layout.register(command_creator.create_command_to_remove_quantizer(node))
+        if should_remove_fq.get(node.node_name, True):
+            transformation_layout.register(command_creator.create_command_to_remove_quantizer(node))
 
     for node in operations:
         original_bias = node.attributes.get("original_bias", None)
@@ -116,8 +163,11 @@ def revert_operations_to_floating_point_precision(
                 command_creator.create_command_to_update_bias(node, original_bias, quantized_model_graph)
             )
 
-        if node.layer_attributes and node.layer_attributes.constant_attributes is not None:
-            weight_port_ids = node.layer_attributes.get_const_port_ids()
+        if not should_revert_weights_to_fp32.get(node.node_name, True):
+            continue
+
+        if is_node_with_weight_fn(node):
+            weight_port_ids = get_weight_tensor_port_ids_fn(node)
             for port_id in weight_port_ids:
                 original_weight = node.attributes.get(f"original_weight.{port_id}", None)
                 if original_weight is not None:

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -9,21 +9,22 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import warnings
 from dataclasses import dataclass
 from typing import Tuple
 
-import numpy as np
-
+import nncf
 from nncf.common.quantization.quantizers import calculate_asymmetric_level_ranges
 from nncf.common.quantization.quantizers import calculate_symmetric_level_ranges
 from nncf.common.quantization.quantizers import get_num_levels
-from nncf.common.quantization.structs import QuantizationMode
+from nncf.common.quantization.structs import QuantizationScheme as QuantizationMode
 from nncf.common.quantization.structs import QuantizerConfig
 from nncf.common.quantization.structs import QuantizerGroup
-from nncf.common.tensor_statistics.statistics import MinMaxTensorStatistic
-from nncf.experimental.tensor import Tensor
-from nncf.experimental.tensor import TensorDataType
-from nncf.experimental.tensor import functions as fns
+from nncf.experimental.common.tensor_statistics.statistics import MinMaxTensorStatistic
+from nncf.quantization.advanced_parameters import FP8Type
+from nncf.tensor import Tensor
+from nncf.tensor import TensorDataType
+from nncf.tensor import functions as fns
 
 
 @dataclass
@@ -43,6 +44,21 @@ class FakeQuantizeParameters:
     output_low: Tensor
     output_high: Tensor
     levels: int
+
+
+@dataclass
+class FakeConvertParameters:
+    """
+    Class handles FakeConvert layer attributes.
+
+    :param scale: Tensor with the scale for input value.
+    :param shift: Tensor with the shift for input value.
+    :param destination_type: Destination type.
+    """
+
+    scale: Tensor
+    shift: Tensor
+    destination_type: FP8Type
 
 
 def fix_zero_filters_symmetric(max_values: Tensor, eps: float = 0.01) -> Tensor:
@@ -106,8 +122,14 @@ def tune_range(
         fval = -left_border * s
         qval = fns.round(fval)
 
-    ra = fns.where(qval < level_high, qval / (qval - level_high) * right_border, left_border)
-    rb = fns.where(qval > 0.0, (qval - level_high) / qval * left_border, right_border)
+    with warnings.catch_warnings():
+        # If `qval` is 0 `rb` will equal `right_border`, and we don't want to show an unnecessary division by 0 warning
+        # The same for (qval - level_high)
+        warnings.simplefilter("ignore")
+        ra_then_result = qval / (qval - level_high) * right_border
+        rb_then_result = (qval - level_high) / qval * left_border
+    ra = fns.where(qval < level_high, ra_then_result, left_border)
+    rb = fns.where(qval > 0.0, rb_then_result, right_border)
 
     range_a = right_border - ra
     range_b = rb - left_border
@@ -169,7 +191,7 @@ def asymmetric_range(
     :param max_values: Collected max values for the quantized insertion.
     :param quantizer_config: Config of the quantization configuration.
     :param unify_zp: Whether to unify the zero point.
-        It is `True` for the per-tensor zero point constrain on KMB (vpu2p0).
+        It is `True` for the per-tensor zero point constrain on KMB.
     :return: A Tuple
         level_low - the low quant number
         level_high - the high quant number
@@ -220,8 +242,8 @@ def calculate_quantizer_parameters(
         False - the full range is used.
     :return: Parameters of the FakeQuantize layer.
     """
-    min_values = Tensor(statistics.min_values).astype(TensorDataType.float32)
-    max_values = Tensor(statistics.max_values).astype(TensorDataType.float32)
+    min_values = statistics.min_values.astype(TensorDataType.float32)
+    max_values = statistics.max_values.astype(TensorDataType.float32)
 
     if half_range:
         input_low, input_high, levels = _calculate_scaled_parameters(
@@ -246,6 +268,37 @@ def calculate_quantizer_parameters(
     return FakeQuantizeParameters(input_low, input_high, output_low, output_high, levels)
 
 
+def calculate_convert_parameters(
+    statistics: MinMaxTensorStatistic,
+    is_per_channel: False,
+    destination_type: FP8Type = FP8Type.E4M3,
+    activation_scale: float = 0.5,
+) -> FakeConvertParameters:
+    """
+    Calculates FakeConvert layer attributes for weight/activation quantizer.
+
+    :param statistics: Collected statistics for the quantized insertion.
+    :param is_activation: Whether is for activation or weights.
+    :param destination_type: Destination type that regulates maximum value for the formula.
+    :param activation_scale: Factor for calculated activation scale.
+    :return: Parameters of the FakeConvert layer.
+    """
+
+    destination_type_maximum = {FP8Type.E4M3: 448, FP8Type.E5M2: 57344}
+
+    max_values = statistics.max_values
+    min_values = statistics.min_values
+
+    max_destination_value = destination_type_maximum[destination_type]
+    tensor_dtype = fns.finfo(max_values)
+    scale = max_destination_value / fns.maximum(max_values, fns.abs(min_values) + tensor_dtype.eps)
+    if not is_per_channel:
+        scale = fns.squeeze(activation_scale * scale)
+    shift = fns.zeros_like(scale).astype(TensorDataType.float32)
+    scale = scale.astype(TensorDataType.float32)
+    return FakeConvertParameters(scale, shift, destination_type)
+
+
 def _calculate_scaled_parameters(
     min_values: Tensor,
     max_values: Tensor,
@@ -268,9 +321,9 @@ def _calculate_scaled_parameters(
         levels: Number of quantization levels.
     """
     if quantizer_config.mode == QuantizationMode.ASYMMETRIC:
-        raise RuntimeError("half_range is only applied to symmetric quantization mode.")
+        raise nncf.ValidationError("half_range is only applied to symmetric quantization mode.")
     if quant_group != QuantizerGroup.WEIGHTS:
-        raise RuntimeError("half_range is only applied to weight quantizers.")
+        raise nncf.ValidationError("half_range is only applied to weight quantizers.")
 
     num_bits = quantizer_config.num_bits
     level_low, level_high = calculate_symmetric_level_ranges(num_bits - 1, signed=True, narrow_range=False)
@@ -288,8 +341,8 @@ def _calculate_scaled_parameters(
 
 
 def calculate_scale_zero_point(
-    input_low: np.ndarray, input_high: np.ndarray, level_low: int, level_high: int, narrow_range: bool
-) -> Tuple[np.ndarray, np.ndarray]:
+    input_low: Tensor, input_high: Tensor, level_low: int, level_high: int, narrow_range: bool
+) -> Tuple[Tensor, Tensor]:
     """
     Calculates scale and zero_point values for the quantizer.
 
@@ -304,11 +357,11 @@ def calculate_scale_zero_point(
     :return: Scale and Zero point values.
     """
     levels = level_high - level_low if narrow_range else level_high - level_low + 1
-    scale = np.array((input_high - input_low) / (levels - 1)).astype(np.float32)
-    eps = np.finfo(scale.dtype).eps
+    scale = ((input_high - input_low) / (levels - 1)).astype(TensorDataType.float32)
+    eps = fns.finfo(scale).eps
     # NOTE: adding machine epsilon to avoid division by zero
-    scale[np.abs(scale) < eps] = eps
+    scale = fns.where(fns.abs(scale) < eps, eps, scale)
     expected_level_low = level_low + 1 if narrow_range else level_low
-    zero_point = expected_level_low - np.round(input_low / scale)
-    zero_point = np.clip(zero_point.astype(np.int32), level_low, level_high)
+    zero_point = expected_level_low - fns.round(input_low / scale)
+    zero_point = fns.clip(zero_point.astype(TensorDataType.int32), level_low, level_high)
     return scale, zero_point

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -19,16 +19,16 @@ from nncf.common.graph import NNCFNode
 from nncf.common.graph.definitions import NNCFGraphNodeType
 from nncf.common.graph.transformations.commands import TargetType
 from nncf.experimental.common.tensor_statistics.collectors import TensorCollector
-from nncf.experimental.tensor import Tensor
 from nncf.quantization.algorithms.fast_bias_correction.backend import FastBiasCorrectionAlgoBackend
+from nncf.tensor import Tensor
 from nncf.torch.graph.transformations.command_creation import create_bias_correction_command
 from nncf.torch.graph.transformations.commands import PTBiasCorrectionCommand
-from nncf.torch.graph.transformations.commands import PTModelExtractionWithFusedBiasCommand
+from nncf.torch.graph.transformations.commands import PTModelExtractionCommand
 from nncf.torch.graph.transformations.commands import PTTargetPoint
-from nncf.torch.model_analyzer import get_fused_bias_value
-from nncf.torch.model_analyzer import get_potential_fused_node
-from nncf.torch.model_analyzer import is_node_with_fused_bias
-from nncf.torch.model_analyzer import is_quantized_weights
+from nncf.torch.model_graph_manager import get_fused_bias_value
+from nncf.torch.model_graph_manager import get_potential_fused_node
+from nncf.torch.model_graph_manager import is_node_with_fused_bias
+from nncf.torch.model_graph_manager import is_quantized_weights
 from nncf.torch.nncf_network import NNCFNetwork
 from nncf.torch.tensor_statistics.collectors import get_mean_statistic_collector
 
@@ -54,8 +54,10 @@ class PTFastBiasCorrectionAlgoBackend(FastBiasCorrectionAlgoBackend):
         return create_bias_correction_command(node, bias_value.data)
 
     @staticmethod
-    def model_extraction_command(inputs: List[str], outputs: List[str]) -> PTModelExtractionWithFusedBiasCommand:
-        return PTModelExtractionWithFusedBiasCommand(inputs[0])
+    def model_extraction_command(
+        input_ids: List[Tuple[str, int]], output_ids: List[Tuple[str, int]]
+    ) -> PTModelExtractionCommand:
+        return PTModelExtractionCommand([input_ids[0][0]], [output_ids[0][0]])
 
     @staticmethod
     def mean_statistic_collector(
@@ -67,7 +69,7 @@ class PTFastBiasCorrectionAlgoBackend(FastBiasCorrectionAlgoBackend):
         return get_mean_statistic_collector(num_samples, channel_axis, window_size)
 
     @staticmethod
-    def get_sub_input_output_names(subgraph: NNCFNetwork) -> Tuple[str, str]:
+    def get_sub_input_output_names(subgraph: NNCFNetwork) -> Tuple[Optional[str], Optional[str]]:
         # Pytorch does not have name for extracted node
         return None, None
 
@@ -88,7 +90,7 @@ class PTFastBiasCorrectionAlgoBackend(FastBiasCorrectionAlgoBackend):
         return 0, 0
 
     @staticmethod
-    def process_model_output(raw_data: Dict, output_name: str) -> Tensor:
+    def process_model_output(raw_data: Dict, output_name: Optional[str]) -> Tensor:
         return Tensor(raw_data)
 
     @staticmethod
@@ -105,3 +107,7 @@ class PTFastBiasCorrectionAlgoBackend(FastBiasCorrectionAlgoBackend):
         next_norm_node = get_potential_fused_node(input_node_name, nncf_graph)
         output_node_name = next_norm_node.node_name if next_norm_node else input_node_name
         return input_node_name, output_node_name
+
+    @staticmethod
+    def get_activation_channel_axis(node: NNCFNode, pord_id: int, input_shape: Tuple[int]) -> int:
+        return node.metatype.output_channel_axis

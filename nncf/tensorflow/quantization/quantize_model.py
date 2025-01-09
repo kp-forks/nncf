@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -9,10 +9,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 
 import tensorflow as tf
 
+import nncf
 from nncf.common.initialization.dataloader import NNCFDataLoader
 from nncf.common.quantization.structs import QuantizationPreset
 from nncf.config import NNCFConfig
@@ -21,6 +22,7 @@ from nncf.config.structures import QuantizationRangeInitArgs
 from nncf.data import Dataset
 from nncf.data.dataset import DataProvider
 from nncf.parameters import ModelType
+from nncf.parameters import QuantizationMode
 from nncf.parameters import TargetDevice
 from nncf.quantization.advanced_parameters import AdvancedQuantizationParameters
 from nncf.quantization.advanced_parameters import apply_advanced_parameters_to_config
@@ -133,10 +135,11 @@ def _create_nncf_config(
 def quantize_impl(
     model: tf.Module,
     calibration_dataset: Dataset,
-    preset: Union[QuantizationPreset, None],
-    target_device: TargetDevice,
-    subset_size: int,
-    fast_bias_correction: bool,
+    mode: Optional[QuantizationMode] = None,
+    preset: Optional[QuantizationPreset] = None,
+    target_device: TargetDevice = TargetDevice.ANY,
+    subset_size: int = 300,
+    fast_bias_correction: bool = True,
     model_type: Optional[ModelType] = None,
     ignored_scope: Optional[IgnoredScope] = None,
     advanced_parameters: Optional[AdvancedQuantizationParameters] = None,
@@ -149,13 +152,16 @@ def quantize_impl(
     if fast_bias_correction is False:
         raise ValueError(f"fast_bias_correction={fast_bias_correction} is not supported")
     if ignored_scope is not None and ignored_scope.types:
-        raise RuntimeError(
+        raise nncf.InternalError(
             "Quantization algorithm form the TensorFlow backend "
             "does not support operation types in the ignored "
             "scopes yet"
         )
     if target_device == TargetDevice.CPU_SPR:
-        raise RuntimeError("target_device == CPU_SPR is not supported.")
+        raise nncf.InternalError("target_device == CPU_SPR is not supported.")
+
+    if mode is not None:
+        raise ValueError(f"mode={mode} is not supported")
 
     if preset is None:
         preset = QuantizationPreset.PERFORMANCE

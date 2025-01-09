@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -20,9 +20,9 @@ import pytest
 from pytest import approx
 
 from nncf import NNCFConfig
-from tests.shared.helpers import get_cli_dict_args
-from tests.shared.paths import PROJECT_ROOT
-from tests.shared.paths import TEST_ROOT
+from tests.cross_fw.shared.helpers import get_cli_dict_args
+from tests.cross_fw.shared.paths import PROJECT_ROOT
+from tests.cross_fw.shared.paths import TEST_ROOT
 from tests.torch.helpers import Command
 from tests.torch.sample_test_validator import BaseSampleTestCaseDescriptor
 from tests.torch.sample_test_validator import BaseSampleValidator
