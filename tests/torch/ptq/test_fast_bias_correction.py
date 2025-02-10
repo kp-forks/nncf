@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -16,10 +16,10 @@ import torch
 
 from nncf.common.factory import NNCFGraphFactory
 from nncf.quantization.algorithms.fast_bias_correction.torch_backend import PTFastBiasCorrectionAlgoBackend
-from nncf.torch.model_analyzer import get_fused_bias_value
-from nncf.torch.model_analyzer import is_node_with_fused_bias
+from nncf.torch.model_graph_manager import get_fused_bias_value
+from nncf.torch.model_graph_manager import is_node_with_fused_bias
 from nncf.torch.nncf_network import NNCFNetwork
-from tests.post_training.test_templates.test_fast_bias_correction import TemplateTestFBCAlgorithm
+from tests.cross_fw.test_templates.test_fast_bias_correction import TemplateTestFBCAlgorithm
 from tests.torch.ptq.helpers import get_nncf_network
 
 
@@ -59,9 +59,11 @@ class TestTorchFBCAlgorithm(TemplateTestFBCAlgorithm):
             # TODO(AlexanderDokuchaev): return atol=0.0001 after fix 109189
             assert torch.all(torch.isclose(bias_value, ref_bias, atol=0.02)), f"{bias_value} != {ref_bias}"
             return
-        raise ValueError("Not found node with bias")
+        msg = "Not found node with bias"
+        raise ValueError(msg)
 
 
+@pytest.mark.cuda
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="Skipping for CPU-only setups")
 class TestTorchCudaFBCAlgorithm(TestTorchFBCAlgorithm):
     @staticmethod
@@ -87,4 +89,5 @@ class TestTorchCudaFBCAlgorithm(TestTorchFBCAlgorithm):
             # TODO(AlexanderDokuchaev): return atol=0.0001 after fix 109189
             assert torch.all(torch.isclose(bias_value, ref_bias, atol=0.02)), f"{bias_value} != {ref_bias}"
             return
-        raise ValueError("Not found node with bias")
+        msg = "Not found node with bias"
+        raise ValueError(msg)

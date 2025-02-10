@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -34,7 +34,6 @@ from tests.torch.sparsity.rb.test_algo import get_basic_sparsity_config
 ALGO_NAME_TO_PATH_MAP = {
     "quantization": "nncf.torch.quantization",
     "rb_sparsity": "nncf.torch.sparsity.rb",
-    "binarization": "nncf.torch.binarization",
 }
 
 
@@ -46,24 +45,6 @@ def get_quantization_config() -> NNCFConfig:
 
 def get_sparsity_config() -> NNCFConfig:
     config = get_basic_sparsity_config([1, *LeNet.INPUT_SIZE])
-    return config
-
-
-def get_binarization_config() -> NNCFConfig:
-    config = NNCFConfig()
-    config.update(
-        {
-            "model": "resnet18",
-            "input_info": {"sample_size": [1, *LeNet.INPUT_SIZE]},
-            "compression": [
-                {
-                    "algorithm": "binarization",
-                    "mode": "xnor",
-                    "params": {"activations_quant_start_epoch": 0, "weights_quant_start_epoch": 0},
-                }
-            ],
-        }
-    )
     return config
 
 
@@ -120,7 +101,8 @@ def merge_configs(configs: List[NNCFConfig], use_algo_list: bool = True) -> NNCF
 
     if not use_algo_list:
         if len(algorithms) > 1:
-            raise Exception("If there is more than one algorithm you could use only use_algo_list=True")
+            msg = "If there is more than one algorithm you could use only use_algo_list=True"
+            raise Exception(msg)
         res_config["compression"] = algorithms[0]
     else:
         res_config["compression"] = algorithms
@@ -131,7 +113,7 @@ def merge_configs(configs: List[NNCFConfig], use_algo_list: bool = True) -> NNCF
 
 def get_configs_building_params() -> List[Dict]:
     res = []
-    get_orig_config_fns = [get_quantization_config, get_sparsity_config, get_binarization_config]
+    get_orig_config_fns = [get_quantization_config, get_sparsity_config]
     num_orig_configs = len(get_orig_config_fns)
 
     for global_multiplier in [0, 1, 10]:
@@ -294,7 +276,8 @@ def create_initialized_one_parameter_model_and_dataloader(
         elif parameter_cls is CompressionParameter:
             param = parameter_cls(data, requires_grad=init_requires_grad, compression_lr_multiplier=multiplier)
         else:
-            raise Exception(f"Unsupported parameter type: {parameter_cls}")
+            msg = f"Unsupported parameter type: {parameter_cls}"
+            raise Exception(msg)
 
     for setting_type, requires_grad in requires_grad_settings:
         if setting_type == "attr":
@@ -302,7 +285,8 @@ def create_initialized_one_parameter_model_and_dataloader(
         elif setting_type == "fn":
             param.requires_grad_(requires_grad)
         else:
-            raise Exception(f"Unsupported setting type: {setting_type}")
+            msg = f"Unsupported setting type: {setting_type}"
+            raise Exception(msg)
 
     model = OneParameterModel(param)
     train_loader = DataLoader(
@@ -339,12 +323,6 @@ def perform_model_training_steps(model: nn.Module, train_loader: DataLoader, num
     with set_torch_seed():
         train_loader = iter(train_loader)
         optimizer = SGD(model.parameters(), lr=0.1)
-
-        # This block of code is needed to initialize scale in the binarization algorithm
-        # TODO: perform binarization scale init in the same way as for quantization
-        with torch.no_grad():
-            x, y_gt = next(train_loader)
-            model(x)
 
         for _ in range(num_steps):
             optimizer.zero_grad()

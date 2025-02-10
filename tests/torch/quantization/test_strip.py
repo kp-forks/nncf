@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -20,9 +20,9 @@ import nncf
 from nncf.common.quantization.quantizers import calculate_asymmetric_level_ranges
 from nncf.common.quantization.quantizers import calculate_symmetric_level_ranges
 from nncf.common.quantization.quantizers import get_num_levels
-from nncf.common.quantization.structs import QuantizationMode
+from nncf.common.quantization.structs import QuantizationScheme as QuantizationMode
 from nncf.config import NNCFConfig
-from nncf.torch.nncf_network import ExtraCompressionModuleType
+from nncf.torch.graph.transformations.commands import ExtraCompressionModuleType
 from nncf.torch.quantization.layers import AsymmetricQuantizer
 from nncf.torch.quantization.layers import PTQuantizerSpec
 from nncf.torch.quantization.layers import SymmetricQuantizer
@@ -110,7 +110,8 @@ def range_mode_to_args(range_mode: str) -> Tuple[bool, bool]:
         return True, False
     if range_mode == "narrow_range":
         return False, True
-    raise ValueError(f"{range_mode} is not supported.")
+    msg = f"{range_mode} is not supported."
+    raise ValueError(msg)
 
 
 @pytest.mark.parametrize("input_size", INPUT_TEST_SCALES, ids=_idfn)
@@ -300,36 +301,27 @@ def test_strip_quantization(mode, overflow_fix, tmp_path):
     torch.onnx.export(inference_model, input_tensor, f"{tmp_path}/model.onnx")
 
 
-@pytest.mark.parametrize("do_copy", (True, False))
-def test_do_copy(do_copy):
-    model = BasicConvTestModel()
-    config = _get_config_for_algo(model.INPUT_SIZE)
-    register_bn_adaptation_init_args(config)
-    compressed_model, compression_ctrl = create_compressed_model_and_algo_for_test(model, config)
-
-    inference_model = compression_ctrl.strip(do_copy=do_copy)
-
-    if do_copy:
-        assert id(inference_model) != id(compressed_model)
-    else:
-        assert id(inference_model) == id(compressed_model)
-
-    assert id(compressed_model) == id(compression_ctrl.model)
-
-
 @pytest.mark.parametrize("strip_type", ("nncf", "torch", "nncf_interfere"))
-def test_nncf_strip_api(strip_type):
+@pytest.mark.parametrize("do_copy", (True, False), ids=["copy", "inplace"])
+def test_nncf_strip_api(strip_type, do_copy):
     model = BasicConvTestModel()
     config = _get_config_for_algo(model.INPUT_SIZE)
 
-    quantized_model, _ = create_compressed_model_and_algo_for_test(model, config)
+    quantized_model, compression_ctrl = create_compressed_model_and_algo_for_test(model, config)
 
     if strip_type == "nncf":
-        strip_model = nncf.strip(quantized_model)
+        strip_model = nncf.strip(quantized_model, do_copy)
     elif strip_type == "torch":
-        strip_model = nncf.torch.strip(quantized_model)
+        strip_model = nncf.torch.strip(quantized_model, do_copy)
     elif strip_type == "nncf_interfere":
-        strip_model = quantized_model.nncf.strip()
+        strip_model = quantized_model.nncf.strip(do_copy)
 
-    fq = strip_model.conv.get_pre_op("0").op
-    assert isinstance(fq, FakeQuantize)
+    if do_copy:
+        assert id(strip_model) != id(quantized_model)
+    else:
+        assert id(strip_model) == id(quantized_model)
+
+    assert id(quantized_model) == id(compression_ctrl.model)
+
+    assert isinstance(strip_model.conv.get_pre_op("0").op, FakeQuantize)
+    assert isinstance(strip_model.nncf.external_quantizers["/nncf_model_input_0|OUTPUT"], FakeQuantize)

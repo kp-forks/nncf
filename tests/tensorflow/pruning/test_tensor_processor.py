@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -16,11 +16,10 @@ from nncf.tensorflow.pruning.tensor_processor import TFNNCFPruningTensorProcesso
 from nncf.tensorflow.tensor import TFNNCFTensor
 
 
-@pytest.mark.parametrize("device", ("CPU", "GPU"))
+@pytest.mark.parametrize("device", ("CPU", pytest.param("GPU", marks=pytest.mark.nightly)))
 def test_create_tensor(device):
-    if not tf.config.list_physical_devices("GPU"):
-        if device == "GPU":
-            pytest.skip("There are no available CUDA devices")
+    if not tf.config.list_physical_devices("GPU") and device == "GPU":
+        pytest.skip("There are no available CUDA devices")
     shape = [1, 3, 10, 100]
     tensor = TFNNCFPruningTensorProcessor.ones(shape, device)
     assert tf.is_tensor(tensor.tensor)

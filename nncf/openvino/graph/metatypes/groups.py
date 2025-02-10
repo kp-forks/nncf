@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -13,6 +13,7 @@ from nncf.openvino.graph.metatypes import openvino_metatypes as ov_metatypes
 
 QUANTIZE_AGNOSTIC_OPERATIONS = [
     ov_metatypes.OVMaxPoolMetatype,
+    ov_metatypes.OVAdaptiveMaxPoolMetatype,
     ov_metatypes.OVReduceMaxMetatype,
     ov_metatypes.OVReshapeMetatype,
     ov_metatypes.OVSqueezeMetatype,
@@ -38,6 +39,7 @@ QUANTIZE_AGNOSTIC_OPERATIONS = [
     ov_metatypes.OVSpaceToDepthMetatype,
     ov_metatypes.OVBatchToSpaceMetatype,
     ov_metatypes.OVSpaceToBatchMetatype,
+    # ov_metatypes.OVSliceMetatype removed from the agnostic list cause of 149909 ticket.
     # OVReluMetatype is not considered to be QUANTIZATION_AGNOSTIC, because:
     # 1. Runtime doesn't provide performance benefits by quantizing the stand-alone RELU's (ticket: 59548)
     # 2. It's frequently better for the end accuracy to have quantizers set up after the RELU
@@ -61,6 +63,7 @@ INPUTS_QUANTIZABLE_OPERATIONS = [
     ov_metatypes.OVMaximumMetatype,
     ov_metatypes.OVMinimumMetatype,
     ov_metatypes.OVAvgPoolMetatype,
+    ov_metatypes.OVAdaptiveAvgPoolMetatype,
     ov_metatypes.OVReduceMeanMetatype,
     ov_metatypes.OVMVNMetatype,
     ov_metatypes.OVNormalizeL2Metatype,
@@ -85,9 +88,7 @@ INPUTS_QUANTIZABLE_OPERATIONS = [
 ]
 
 
-FAKE_QUANTIZE_OPERATIONS = [
-    ov_metatypes.OVFakeQuantizeMetatype,
-]
+FAKE_QUANTIZE_OPERATIONS = [ov_metatypes.OVFakeQuantizeMetatype, ov_metatypes.OVFakeConvertMetatype]
 
 
 CONSTANT_OPERATIONS = [
@@ -185,8 +186,35 @@ OPERATIONS_WITH_CONST_PORT_ID = [
 
 
 # Contains the operation metatypes for which bias can be applied.
-OPERATIONS_WITH_BIAS = [
+# Limited operations scope
+OPERATIONS_WITH_BIAS_REDUCED = [
     ov_metatypes.OVConvolutionMetatype,
-    # TODO: add all metatypes with bias
     ov_metatypes.OVMatMulMetatype,
+]
+
+OPERATIONS_WITH_BIAS = [
+    *OPERATIONS_WITH_BIAS_REDUCED,
+    ov_metatypes.OVDepthwiseConvolutionMetatype,
+    ov_metatypes.OVConvolutionBackpropDataMetatype,
+]
+
+CONV_OPERATIONS = [
+    ov_metatypes.OVConvolutionMetatype,
+    ov_metatypes.OVDepthwiseConvolutionMetatype,
+    ov_metatypes.OVGroupConvolutionMetatype,
+    ov_metatypes.OVConvolutionBackpropDataMetatype,
+    ov_metatypes.OVGroupConvolutionBackpropDataMetatype,
+]
+
+# These metatypes mix outputs for different samples into one axis.
+# If reducers and aggregators collect statistics at the output of the following operations,
+# assuming that 0-axis is batch axis, they get only 1 value instead of batch_size values.
+# It could lead to inaccurate/incorrect statistics result.
+OPERATIONS_OUTPUT_HAS_NO_BATCH_AXIS = [
+    ov_metatypes.OVSpaceToBatchMetatype,
+    ov_metatypes.OVBatchToSpaceMetatype,
+    ov_metatypes.OVROIPoolingMetatype,
+    ov_metatypes.OVROIAlignMetatype,
+    ov_metatypes.OVEmbeddingMetatype,
+    ov_metatypes.OVIfMetatype,
 ]

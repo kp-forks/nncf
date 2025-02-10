@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -8,20 +8,29 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+from typing import Any, Dict
+
 import numpy as np
 import torch
 from torch import nn
 
+import nncf
 from nncf.common.graph import NNCFNodeName
 from nncf.torch.layer_utils import COMPRESSION_MODULES
+from nncf.torch.layer_utils import StatefullModuleInterface
 
 
 @COMPRESSION_MODULES.register()
-class FilterPruningMask(nn.Module):
+class FilterPruningMask(nn.Module, StatefullModuleInterface):
     """
     A module contains the mask for pruning.
     On forward pass applying the mask to weight and bias of the module.
     """
+
+    MASK_APPLYING_DIM_KEY = "dim"
+    NODE_NAME_KEY = "node_name"
+    SIZE_KEY = "size_key"
 
     def __init__(self, size, node_name, dim=0):
         super().__init__()
@@ -30,11 +39,11 @@ class FilterPruningMask(nn.Module):
         self.node_name = node_name
 
     @property
-    def binary_filter_pruning_mask(self):
+    def binary_filter_pruning_mask(self) -> torch.Tensor:
         return self._binary_filter_pruning_mask
 
     @binary_filter_pruning_mask.setter
-    def binary_filter_pruning_mask(self, mask):
+    def binary_filter_pruning_mask(self, mask: torch.Tensor):
         with torch.no_grad():
             self._binary_filter_pruning_mask.set_(mask)
 
@@ -54,6 +63,19 @@ class FilterPruningMask(nn.Module):
                 )
             )
         return new_params
+
+    def get_config(self) -> Dict[str, Any]:
+        return {
+            self.MASK_APPLYING_DIM_KEY: self.mask_applying_dim,
+            self.NODE_NAME_KEY: self.node_name,
+            self.SIZE_KEY: list(self.binary_filter_pruning_mask.size()),
+        }
+
+    @classmethod
+    def from_config(cls, state: Dict[str, Any]) -> "FilterPruningMask":
+        return FilterPruningMask(
+            size=state[cls.SIZE_KEY], node_name=state[cls.NODE_NAME_KEY], dim=state[cls.MASK_APPLYING_DIM_KEY]
+        )
 
 
 def broadcast_filter_mask(filter_mask, shape, dim=0):
@@ -79,9 +101,10 @@ def apply_filter_binary_mask(
     :return: result with applied mask
     """
     if filter_mask.size(0) != module_parameter.size(dim):
-        raise RuntimeError(
-            "Shape of mask = {} for module {} isn't broadcastable to weight shape={}."
-            " ".format(filter_mask.shape, node_name_for_logging, module_parameter.shape)
+        msg = (
+            f"Shape of mask = {filter_mask.shape} for module {node_name_for_logging}"
+            f" isn't broadcastable to weight shape={module_parameter.shape}."
         )
+        raise nncf.InternalError(msg)
     broadcasted_filter_mask = broadcast_filter_mask(filter_mask, module_parameter.shape, dim)
     return module_parameter.mul(broadcasted_filter_mask)

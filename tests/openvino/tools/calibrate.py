@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -14,7 +14,8 @@ import functools
 import json
 import multiprocessing
 import os
-import tempfile
+import platform
+import subprocess
 from argparse import ArgumentParser
 from collections import OrderedDict
 from collections import defaultdict
@@ -23,33 +24,40 @@ from dataclasses import dataclass
 from dataclasses import replace
 from enum import Enum
 from itertools import islice
-from typing import Any, Iterable, List, Optional, TypeVar
+from typing import Any, Dict, Iterable, List, Optional, TypeVar
 
 import numpy as np
 import openvino.runtime as ov
+import pkg_resources
+from config import Config
 from openvino.runtime import Dimension
 from openvino.runtime import PartialShape
-from openvino.tools import pot
-from openvino.tools.accuracy_checker.evaluators.quantization_model_evaluator import ModelEvaluator
-from openvino.tools.accuracy_checker.evaluators.quantization_model_evaluator import create_model_evaluator
-from openvino.tools.pot.configs.config import Config
+
+try:
+    from accuracy_checker.evaluators.quantization_model_evaluator import ModelEvaluator
+    from accuracy_checker.evaluators.quantization_model_evaluator import create_model_evaluator
+    from accuracy_checker.utils import extract_image_representations
+except ImportError:
+    from openvino.tools.accuracy_checker.evaluators.quantization_model_evaluator import ModelEvaluator
+    from openvino.tools.accuracy_checker.evaluators.quantization_model_evaluator import create_model_evaluator
+    from openvino.tools.accuracy_checker.utils import extract_image_representations
 
 import nncf
 from nncf.common.deprecation import warning_deprecated
+from nncf.common.logging import nncf_logger
 from nncf.common.logging.logger import set_log_file
-from nncf.common.quantization.structs import QuantizationMode
 from nncf.common.quantization.structs import QuantizationPreset
+from nncf.common.quantization.structs import QuantizationScheme
 from nncf.data.dataset import DataProvider
-from nncf.openvino.pot.quantization.quantize_model import (
-    quantize_with_accuracy_control_impl as pot_quantize_with_native_accuracy_control,
-)
 from nncf.parameters import DropType
 from nncf.parameters import ModelType
+from nncf.parameters import QuantizationMode
 from nncf.parameters import TargetDevice
 from nncf.quantization.advanced_parameters import AdvancedAccuracyRestorerParameters
 from nncf.quantization.advanced_parameters import AdvancedQuantizationParameters
 from nncf.quantization.advanced_parameters import AggregatorType
 from nncf.quantization.advanced_parameters import OverflowFix
+from nncf.quantization.advanced_parameters import RestoreMode
 from nncf.quantization.advanced_parameters import StatisticsType
 from nncf.scopes import IgnoredScope
 
@@ -91,7 +99,7 @@ def parse_args():
     """
     parser = ArgumentParser(description="NNCF OpenVINO Benchmarking Tool", allow_abbrev=False)
 
-    parser.add_argument("-c", "--config", help="Path to a config file with optimization parameters (POT format).")
+    parser.add_argument("-c", "--config", help="Path to a config file with optimization parameters (JSON format).")
 
     parser.add_argument(
         "--output-dir", type=str, default="./results", help="The directory where models are saved. Default: ./results"
@@ -99,18 +107,32 @@ def parse_args():
 
     parser.add_argument("--impl", help="NNCF OpenVINO backend implementation.", choices=["pot", "native"], default=None)
 
+    parser.add_argument("--batch_size", help="Batch size", type=int, default=1)
+
     return parser.parse_args()
 
 
 class CustomJSONEncoder(json.JSONEncoder):
     def default(self, o):
         if isinstance(
-            o, (TargetDevice, ModelType, QuantizationPreset, OverflowFix, StatisticsType, AggregatorType, DropType)
+            o,
+            (
+                TargetDevice,
+                ModelType,
+                QuantizationPreset,
+                OverflowFix,
+                StatisticsType,
+                AggregatorType,
+                DropType,
+                QuantizationMode,
+                RestoreMode,
+            ),
         ):
             return o.value
         if isinstance(o, (IgnoredScope, AdvancedQuantizationParameters, AdvancedAccuracyRestorerParameters)):
             return asdict(o)
-        raise TypeError(f"Object of type {o.__class__.__name__} is not JSON serializable")
+        msg = f"Object of type {o.__class__.__name__} is not JSON serializable"
+        raise TypeError(msg)
 
 
 class ACValidationFunction:
@@ -216,9 +238,8 @@ class ACValidationFunction:
 
     def _output_callback(self, raw_predictions, **kwargs):
         if not ("metrics_result" in kwargs and "dataset_indices" in kwargs):
-            raise RuntimeError(
-                "Expected `metrics_result`, `dataset_indices` be passed to output_callback inside accuracy checker"
-            )
+            msg = "Expected `metrics_result`, `dataset_indices` be passed to output_callback inside accuracy checker"
+            raise nncf.ValidationError(msg)
 
         metrics_result = kwargs["metrics_result"]
         if metrics_result is None:
@@ -303,42 +324,48 @@ def set_algorithm_parameters_context(ctx):
 def map_target_device(target_device):
     target_device = target_device.upper()
     if target_device not in [t.value for t in TargetDevice]:
-        raise ValueError(f"{target_device} target device is not supported")
+        msg = f"{target_device} target device is not supported"
+        raise ValueError(msg)
     return {"target_device": TargetDevice(target_device)}
 
 
 def map_model_type(model_type):
     model_type = model_type.lower()
     if model_type not in [m.value for m in ModelType]:
-        raise ValueError(f"{model_type} model type is not supported")
+        msg = f"{model_type} model type is not supported"
+        raise ValueError(msg)
     return {"model_type": ModelType(model_type)}
 
 
 def map_drop_type(drop_type):
     drop_type = drop_type.lower()
     if drop_type not in [m.value for m in DropType]:
-        raise ValueError(f"{drop_type} drop type is not supported")
+        msg = f"{drop_type} drop type is not supported"
+        raise ValueError(msg)
     return {"drop_type": DropType(drop_type)}
 
 
 def map_ignored_scope(ignored):
     if ignored.get("skip_model") is not None:
-        raise ValueError("skip_model attribute in the ignored tag is not supported")
+        msg = "skip_model attribute in the ignored tag is not supported"
+        raise ValueError(msg)
 
     operations = ignored.get("operations")
     ignored_operations = []
     if operations is not None:
         for op in operations:
             if op.get("attributes") is not None:
-                raise ValueError('"attributes" in the ignored operations ' "are not supported")
+                msg = '"attributes" in the ignored operations are not supported'
+                raise ValueError(msg)
             ignored_operations.append(op["type"])
-    return {"ignored_scope": IgnoredScope(names=ignored.get("scope"), types=ignored_operations)}
+    return {"ignored_scope": IgnoredScope(names=ignored.get("scope", []), types=ignored_operations)}
 
 
 def map_preset(preset):
     preset = preset.lower()
     if preset not in [p.value for p in QuantizationPreset]:
-        raise ValueError(f"{preset} preset is not supported")
+        msg = f"{preset} preset is not supported"
+        raise ValueError(msg)
     return {"preset": QuantizationPreset(preset)}
 
 
@@ -355,7 +382,8 @@ def update_statistics_collector_parameters(
 ):
     granularity = pot_config.get("granularity")
     if granularity is not None:
-        raise ValueError('"granularity" parameter in the range estimator is not supported')
+        msg = '"granularity" parameter in the range estimator is not supported'
+        raise ValueError(msg)
 
     stat_collector_names = ["statistics_type", "aggregator_type", "clipping_value", "quantile_outlier_prob"]
     stat_collector_types = [StatisticsType, AggregatorType, float, float]
@@ -379,7 +407,8 @@ def update_range_estimator_parameters(
 ):
     preset = pot_config.get("preset")
     if preset is not None:
-        raise ValueError('"preset" parameter in the range estimator is not supported')
+        msg = '"preset" parameter in the range estimator is not supported'
+        raise ValueError(msg)
 
     min_config = pot_config.get("min")
     max_config = pot_config.get("max")
@@ -421,21 +450,24 @@ def map_range_estmator(range_estimator):
 def update_quantization_parameters(quantization_params, pot_config):
     level_low = pot_config.get("level_low")
     if level_low is not None:
-        raise ValueError('"level_low" parameter is not supported')
+        msg = '"level_low" parameter is not supported'
+        raise ValueError(msg)
     level_high = pot_config.get("level_high")
     if level_high is not None:
-        raise ValueError('"level_high" parameter is not supported')
+        msg = '"level_high" parameter is not supported'
+        raise ValueError(msg)
     num_bits = pot_config.get("bits")
     if num_bits is not None:
         quantization_params.num_bits = num_bits
     mode = pot_config.get("mode")
     if mode is not None:
         if mode == "symmetric":
-            quantization_params.mode = QuantizationMode.SYMMETRIC
+            quantization_params.mode = QuantizationScheme.SYMMETRIC
         elif mode == "asymmetric":
-            quantization_params.mode = QuantizationMode.ASYMMETRIC
+            quantization_params.mode = QuantizationScheme.ASYMMETRIC
         else:
-            raise ValueError(f"mode = {mode} is not supported")
+            msg = f"mode = {mode} is not supported"
+            raise ValueError(msg)
     granularity = pot_config.get("granularity")
     if granularity is not None:
         if granularity == "perchannel":
@@ -443,7 +475,8 @@ def update_quantization_parameters(quantization_params, pot_config):
         elif mode == "pertensor":
             quantization_params.per_channel = False
         else:
-            raise ValueError(f"granularity = {granularity} is not supported")
+            msg = f"granularity = {granularity} is not supported"
+            raise ValueError(msg)
 
 
 def map_weights(weights):
@@ -525,6 +558,13 @@ def map_smooth_quant_alpha(smooth_quant_alpha):
     return map_smooth_quant_alphas({"matmul": smooth_quant_alpha, "convolution": -1})
 
 
+def map_mode(mode):
+    if not hasattr(QuantizationMode, mode):
+        msg = f"{mode} mode is not supported"
+        raise ValueError(msg)
+    return {"mode": getattr(QuantizationMode, mode)}
+
+
 def map_threshold(threshold):
     ctx = get_algorithm_parameters_context()
     advanced_parameter_name = ctx.param_name_map[ParameterNames.advanced_parameters]
@@ -583,7 +623,8 @@ def create_parameters_for_algorithm(
                 if kwarg is not None:
                     ctx.params.update(kwarg)
             else:
-                raise ValueError(f"{name} parameter is not supported")
+                msg = f"{name} parameter is not supported"
+                raise ValueError(msg)
 
         return ctx.params
 
@@ -605,6 +646,7 @@ def get_pot_quantization_parameters_mapping():
         "threshold": map_threshold,
         "smooth_quant_alphas": map_smooth_quant_alphas,
         "smooth_quant_alpha": map_smooth_quant_alpha,
+        "mode": map_mode,
     }
 
     default_parameters = {"use_layerwise_tuning": False}
@@ -686,18 +728,21 @@ def map_paramaters(pot_algo_name, nncf_algo_name, pot_parameters, output_dir):
         return map_quantization_parameters(pot_parameters)
     if nncf_algo_name == "quantize_with_accuracy_control":
         return map_quantize_with_accuracy_control_parameters(pot_parameters, output_dir)
-    raise ValueError(f"Mapping POT {pot_algo_name} parameters to NNCF {nncf_algo_name} parameters is not supported")
+    msg = f"Mapping POT {pot_algo_name} parameters to NNCF {nncf_algo_name} parameters is not supported"
+    raise ValueError(msg)
 
 
 def get_model_paths(model_config):
     if model_config.cascade:
-        raise ValueError("Cascade models are not supported yet.")
+        msg = "Cascade models are not supported yet."
+        raise ValueError(msg)
     return model_config.model, model_config.weights
 
 
 def get_accuracy_checker_config(engine_config):
     if engine_config.type != "accuracy_checker":
-        raise ValueError(f"Engine type {engine_config.type} is not supported.")
+        msg = f"Engine type {engine_config.type} is not supported."
+        raise ValueError(msg)
     return engine_config
 
 
@@ -707,7 +752,8 @@ def get_nncf_algorithms_config(compression_config, output_dir):
     for pot_algo in compression_config.algorithms:
         pot_algo_name = pot_algo.name
         if pot_algo_name not in MAP_POT_NNCF_ALGORITHMS:
-            raise ValueError(f"Algorithm {pot_algo_name} is not supported.")
+            msg = f"Algorithm {pot_algo_name} is not supported."
+            raise ValueError(msg)
 
         nncf_algo_name = MAP_POT_NNCF_ALGORITHMS[pot_algo_name]["method"]
         advanced_parameters = MAP_POT_NNCF_ALGORITHMS[pot_algo_name].get("advanced_parameters", None)
@@ -760,23 +806,24 @@ def maybe_reshape_model(model, dataset, subset_size, input_to_tensor_name):
         model_inputs_shapes[input_to_tensor_name[input_node.friendly_name]] = tuple(partial_shape)
 
     if len(dataset_inputs_shapes) != len(model_inputs_shapes):
-        raise RuntimeError(
+        msg = (
             f"Model inputs: {list(model_inputs_shapes.keys())}"
             f" and dataset inputs {list(dataset_inputs_shapes.keys())} are not compatible"
         )
+        raise nncf.InternalError(msg)
 
     for name in model_inputs_shapes:
         if name not in dataset_inputs_shapes:
-            raise RuntimeError(
-                f"Model input {name} is not present in dataset inputs: {list(dataset_inputs_shapes.keys())}"
-            )
+            msg = f"Model input {name} is not present in dataset inputs: {list(dataset_inputs_shapes.keys())}"
+            raise nncf.ValidationError(msg)
 
     dynamic_dims = defaultdict(list)
     reshaped_static_dims = defaultdict(list)
     for name, shapes in dataset_inputs_shapes.items():
         shapes = list(shapes)
         if len(set(len(shape) for shape in shapes)) != 1 or len(model_inputs_shapes[name]) != len(shapes[0]):
-            raise RuntimeError("calibrate.py does not support dataset with dynamic ranks")
+            msg = "calibrate.py does not support dataset with dynamic ranks"
+            raise nncf.InternalError(msg)
 
         for idx in range(len(shapes[0])):
             if len(shapes) == 1:
@@ -813,8 +860,8 @@ def maybe_reshape_model(model, dataset, subset_size, input_to_tensor_name):
 
 
 def get_transform_fn(model_evaluator: ModelEvaluator, ov_model):
-    if model_evaluator.launcher._lstm_inputs:
-        compiled_original_model = ov.Core().compile_model(ov_model)
+    if isinstance(model_evaluator, ModelEvaluator) and model_evaluator.launcher._lstm_inputs:
+        compiled_original_model = ov.Core().compile_model(ov_model, device_name="CPU")
         model_outputs = None
 
         def transform_fn(data_item: ACDattasetWrapper.DataItem):
@@ -864,45 +911,54 @@ class ACDattasetWrapper:
 
     def __init__(self, model_evaluator):
         self.model_evaluator = model_evaluator
+        self.batch_size = self.model_evaluator.dataset.batch
 
     def __iter__(self):
-        for sequence in self.model_evaluator.dataset:
-            _, batch_annotation, batch_input, _ = sequence
-            filled_inputs, _, _ = self.model_evaluator._get_batch_input(batch_input, batch_annotation)
-            for idx, filled_input in enumerate(filled_inputs):
-                input_data = {}
-                for name, value in filled_input.items():
-                    input_data[self.model_evaluator.launcher.input_to_tensor_name[name]] = value
-                status = self.Status.SEQUENCE_IS_GOING
-                if idx == len(filled_inputs) - 1:
-                    status = self.Status.END_OF_SEQUENCE
-                yield self.DataItem(input_data, status)
+        if isinstance(self.model_evaluator, ModelEvaluator):
+            for sequence in self.model_evaluator.dataset:
+                _, batch_annotation, batch_input, _ = sequence
+                filled_inputs, _, _ = self.model_evaluator._get_batch_input(batch_input, batch_annotation)
+                for idx, filled_input in enumerate(filled_inputs):
+                    input_data = {}
+                    for name, value in filled_input.items():
+                        input_data[self.model_evaluator.launcher.input_to_tensor_name[name]] = value
+                    status = self.Status.SEQUENCE_IS_GOING
+                    if idx == len(filled_inputs) - 1:
+                        status = self.Status.END_OF_SEQUENCE
+                    yield self.DataItem(input_data, status)
+        else:
+            for sequence in self.model_evaluator.dataset:
+                _, batch_annotation, batch_input, _ = sequence
+                batch_inputs = self.model_evaluator._internal_module.preprocessor.process(batch_input, batch_annotation)
+                batch_data, _ = extract_image_representations(batch_inputs)
+                input_data = np.expand_dims(batch_data[0], axis=0)
+                yield self.DataItem(input_data, self.Status.END_OF_SEQUENCE)
 
     def __len__(self):
         return len(self.model_evaluator.dataset)
 
     def calculate_per_sample_subset_size(self, sequence_subset_size):
-        subset_size = 0
-        for data_item in islice(self.model_evaluator.dataset, sequence_subset_size):
-            _, batch_annotation, batch_input, _ = data_item
-            filled_inputs, _, _ = self.model_evaluator._get_batch_input(batch_input, batch_annotation)
-            subset_size += len(filled_inputs)
-        return subset_size
+        if isinstance(self.model_evaluator, ModelEvaluator):
+            subset_size = 0
+            for data_item in islice(self.model_evaluator.dataset, sequence_subset_size):
+                _, batch_annotation, batch_input, _ = data_item
+                filled_inputs, _, _ = self.model_evaluator._get_batch_input(batch_input, batch_annotation)
+                subset_size += len(filled_inputs)
+            return subset_size
+        else:
+            return sequence_subset_size
 
 
-def quantize_model(xml_path, bin_path, accuracy_checker_config, quantization_impl, quantization_parameters):
+def quantize_model(xml_path, bin_path, accuracy_checker_config, quantization_parameters):
     ov_model = ov.Core().read_model(model=xml_path, weights=bin_path)
     model_evaluator = create_model_evaluator(accuracy_checker_config)
-    model_evaluator.load_network([{"model": ov_model}])
+    if isinstance(model_evaluator, ModelEvaluator):
+        model_evaluator.load_network([{"model": ov_model}])
     model_evaluator.select_dataset("")
 
     advanced_parameters = quantization_parameters.get("advanced_parameters", AdvancedQuantizationParameters())
-    if quantization_impl == "pot":
-        advanced_parameters.backend_params["use_pot"] = True
-    elif quantization_impl == "native":
-        advanced_parameters.backend_params["use_pot"] = False
-    else:
-        raise NotImplementedError()
+    if quantization_parameters.get("mode", None) is not None:
+        advanced_parameters.backend_params = None
     quantization_parameters["advanced_parameters"] = advanced_parameters
 
     transform_fn = get_transform_fn(model_evaluator, ov_model)
@@ -939,27 +995,19 @@ class ACDataset:
         return DataProvider(ACDattasetWrapper(self._model_evaluator), self._transform_func, indices)
 
 
-def initialize_model_and_evaluator(xml_path: str, bin_path: str, accuracy_checker_config, quantization_impl: str):
+def initialize_model_and_evaluator(xml_path: str, bin_path: str, accuracy_checker_config):
     model_evaluator = create_model_evaluator(accuracy_checker_config)
 
-    with tempfile.TemporaryDirectory(dir=tempfile.gettempdir()) as tmp_dir:
-        if quantization_impl == "pot":
-            pot_model = pot.load_model({"model_name": "model", "model": xml_path, "weights": bin_path}, "CPU")
-            paths = pot.save_model(pot_model, save_path=tmp_dir, model_name="model")
-            xml_path, bin_path = paths[0]["model"], paths[0]["weights"]
-
-        model = ov.Core().read_model(xml_path, bin_path)
-        model_evaluator.load_network_from_ir([{"model": xml_path, "weights": bin_path}])
-        model_evaluator.select_dataset("")
+    model = ov.Core().read_model(xml_path, bin_path)
+    model_evaluator.load_network_from_ir([{"model": xml_path, "weights": bin_path}])
+    model_evaluator.select_dataset("")
     return model, model_evaluator
 
 
 def quantize_model_with_accuracy_control(
-    xml_path: str, bin_path: str, accuracy_checker_config, quantization_impl: str, quantization_parameters
+    xml_path: str, bin_path: str, accuracy_checker_config, quantization_parameters
 ):
-    ov_model, model_evaluator = initialize_model_and_evaluator(
-        xml_path, bin_path, accuracy_checker_config, quantization_impl
-    )
+    ov_model, model_evaluator = initialize_model_and_evaluator(xml_path, bin_path, accuracy_checker_config)
 
     transform_fn = get_transform_fn(model_evaluator, ov_model)
     dataset = get_dataset(model_evaluator, quantization_parameters)
@@ -982,29 +1030,14 @@ def quantize_model_with_accuracy_control(
         metric_name = metric_type
     validation_fn = ACValidationFunction(model_evaluator, metric_name, metric_type)
 
-    name_to_quantization_impl_map = {
-        "pot": pot_quantize_with_native_accuracy_control,
-        "native": nncf.quantize_with_accuracy_control,
-    }
-
     advanced_parameters = quantization_parameters.get(
         "advanced_quantization_parameters", AdvancedQuantizationParameters()
     )
-    if quantization_impl == "pot":
-        advanced_parameters.backend_params["use_pot"] = True
-    elif quantization_impl == "native":
-        advanced_parameters.backend_params["use_pot"] = False
-    else:
-        raise NotImplementedError()
     quantization_parameters["advanced_quantization_parameters"] = advanced_parameters
 
-    quantization_impl_fn = name_to_quantization_impl_map.get(quantization_impl)
-    if quantization_impl:
-        quantized_model = quantization_impl_fn(
-            ov_model, calibration_dataset, validation_dataset, validation_fn, **quantization_parameters
-        )
-    else:
-        raise NotImplementedError(f"Unsupported implementation: {quantization_impl}")
+    quantized_model = nncf.quantize_with_accuracy_control(
+        ov_model, calibration_dataset, validation_dataset, validation_fn, **quantization_parameters
+    )
 
     if original_model_shapes is not None:
         quantized_model.reshape(original_model_shapes)
@@ -1012,7 +1045,7 @@ def quantize_model_with_accuracy_control(
 
 
 def filter_configuration(config: Config) -> Config:
-    fields_to_filter = ["smooth_quant_alphas", "smooth_quant_alpha"]
+    fields_to_filter = ["smooth_quant_alphas", "smooth_quant_alpha", "mode"]
     algorithms_to_update = defaultdict(dict)
 
     # Drop params before configure
@@ -1039,41 +1072,137 @@ def filter_configuration(config: Config) -> Config:
     return config
 
 
+def update_accuracy_checker_config(accuracy_checker_config: Config, batch_size: int) -> None:
+    """
+    Updates batch section of accuracy checker configuration file by batch_size value.
+
+    :param accuracy_checker_config: Accuracy checker configuration file.
+    :param batch_size: Batch size value.
+    """
+    for model in accuracy_checker_config["models"]:
+        for dataset in model["datasets"]:
+            dataset["batch"] = batch_size
+            print(f"Updated batch size value to {batch_size}")
+
+
+def update_nncf_algorithms_config(nncf_algorithms_config: Dict[str, Dict[str, Any]], batch_size: int) -> None:
+    """
+    Updates subset_size parameter depending on batch_size and subset_size from an algorithm config.
+
+    :param nncf_algorithms_config: Configuration file of an algorithm.
+    :param batch_size: Batch size value.
+    """
+    for nncf_method, config in nncf_algorithms_config.items():
+        subset_size = config.get("subset_size", 300)
+        new_subset_size = subset_size // batch_size
+        config["subset_size"] = new_subset_size
+        print(f"Updated subset_size value for {nncf_method} method to {new_subset_size} ")
+
+
+class EnvInfo:
+
+    @staticmethod
+    def print_info() -> None:
+        """
+        Prints NNCF version, python version and CPU model name.
+        """
+        python_version = EnvInfo._get_python_version()
+        nncf_version = EnvInfo._get_nncf_version()
+        cpu_model = EnvInfo._get_cpu_model()
+
+        nncf_logger.info(f"Python version: {python_version}")
+        nncf_logger.info(f"NNCF version: {nncf_version}")
+        nncf_logger.info(f"CPU model: {cpu_model}")
+
+    @staticmethod
+    def _get_nncf_version() -> str:
+        try:
+            version = pkg_resources.get_distribution("nncf").version
+        except pkg_resources.DistributionNotFound:
+            version = "Unknown"
+        return version
+
+    @staticmethod
+    def _get_python_version() -> str:
+        return platform.python_version()
+
+    @staticmethod
+    def _get_cpu_model() -> str:
+        """
+        Returns CPU device name.
+        """
+
+        def _get_cpu_model_name_linux_os() -> str:
+            try:
+                output = subprocess.check_output("lscpu", shell=True)
+                for line in output.decode().splitlines():
+                    if "Model name:" in line:
+                        return line.split(":")[1].strip()
+                return "Unknown"
+            except Exception:
+                return "Unknown"
+
+        def _get_cpu_model_name_windows() -> str:
+            try:
+                output = subprocess.check_output("wmic cpu get name", shell=True)
+                return output.decode().splitlines()[1].strip()
+            except Exception:
+                return "Unknown"
+
+        os_name = platform.system()
+
+        cpu_model = "Unknown"
+        if os_name == "Linux":
+            cpu_model = _get_cpu_model_name_linux_os()
+        elif os_name == "Windows":
+            cpu_model = _get_cpu_model_name_windows()
+
+        return cpu_model
+
+
 def main():
     args = parse_args()
+    if args.impl is not None:
+        print("--impl option is deprecated and will have no effect. Only native calibration allowed.")
     config = Config.read_config(args.config)
     config = filter_configuration(config)
 
     xml_path, bin_path = get_model_paths(config.model)
     accuracy_checker_config = get_accuracy_checker_config(config.engine)
     nncf_algorithms_config = get_nncf_algorithms_config(config.compression, args.output_dir)
+    assert args.batch_size >= 0
+    if args.batch_size > 1:
+        update_accuracy_checker_config(accuracy_checker_config, args.batch_size)
+        update_nncf_algorithms_config(nncf_algorithms_config, args.batch_size)
 
     set_log_file(f"{args.output_dir}/log.txt")
     output_dir = os.path.join(args.output_dir, "optimized")
     os.makedirs(output_dir, exist_ok=True)
+
+    EnvInfo.print_info()
 
     algo_name_to_method_map = {
         "quantize": quantize_model,
         "quantize_with_accuracy_control": quantize_model_with_accuracy_control,
     }
     for algo_name, algo_config in nncf_algorithms_config.items():
-        algo_fn = algo_name_to_method_map.get(algo_name, None)
+        algo_fn = algo_name_to_method_map.get(algo_name)
         if algo_fn:
             quantize_model_arguments = {
                 "xml_path": xml_path,
                 "bin_path": bin_path,
                 "accuracy_checker_config": accuracy_checker_config,
-                "quantization_impl": args.impl,
                 "quantization_parameters": algo_config,
             }
 
             output_model = algo_fn(**quantize_model_arguments)
 
             path = os.path.join(output_dir, "algorithm_parameters.json")
-            keys = ["xml_path", "quantization_impl", "quantization_parameters"]
+            keys = ["xml_path", "quantization_parameters"]
             dump_to_json(path, quantize_model_arguments, keys)
         else:
-            raise RuntimeError(f"Support for {algo_name} is not implemented in the optimize tool.")
+            msg = f"Support for {algo_name} is not implemented in the optimize tool."
+            raise nncf.InternalError(msg)
 
     model_name = config.model.model_name
     output_model_path = os.path.join(output_dir, f"{model_name}.xml")

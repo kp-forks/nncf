@@ -58,13 +58,6 @@
             }
         },
         {
-            "type": "ConvolutionBackpropData",
-            "quantization": {
-                "activations": "q8_a",
-                "weights": ["q8_w_sym", "q8_w_asym"]
-            }
-        },
-        {
             "type": "MatMul",
             "quantization": {
                 "activations": "q8_a",
@@ -286,6 +279,7 @@
         {"type": "Transpose"},
         {"type": "Tile"},
         {"type": "StridedSlice"},
+        {"type": "Slice"},
         {"type": "ShuffleChannels"},
         {"type": "Broadcast"},
         {"type": "Pad"},

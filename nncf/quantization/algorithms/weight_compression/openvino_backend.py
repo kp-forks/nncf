@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -8,416 +8,402 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from collections import OrderedDict
-from dataclasses import dataclass
-from typing import List, Optional, Tuple, TypeVar
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
-import numpy as np
-import openvino.runtime as ov
-from openvino.runtime import opset9 as opset
+import openvino as ov
+from openvino.runtime import opset13 as opset
 
+import nncf
+from nncf.common.graph import NNCFGraph
 from nncf.common.graph import NNCFNode
 from nncf.common.graph.operator_metatypes import OperatorMetatype
-from nncf.common.logging import nncf_logger
-from nncf.common.logging.track_progress import track
-from nncf.common.utils.helpers import create_table
-from nncf.openvino.graph.metatypes.openvino_metatypes import OVEmbeddingMetatype
-from nncf.openvino.graph.metatypes.openvino_metatypes import OVMatMulMetatype
-from nncf.openvino.graph.node_utils import get_channel_agnostic_reduction_axes
+from nncf.common.graph.transformations.commands import TargetType
+from nncf.common.graph.utils import get_reduction_axes
+from nncf.common.tensor_statistics.statistic_point import StatisticPoint
+from nncf.common.utils.caching import disable_results_caching
+from nncf.experimental.common.tensor_statistics.collectors import MeanAggregator
+from nncf.experimental.common.tensor_statistics.collectors import NoopAggregator
+from nncf.experimental.common.tensor_statistics.collectors import TensorCollector
+from nncf.experimental.common.tensor_statistics.statistics import MaxVarianceTensorStatistic
+from nncf.experimental.common.tensor_statistics.statistics import MeanMagnitudeTensorStatistic
+from nncf.experimental.common.tensor_statistics.statistics import MeanVarianceTensorStatistic
+from nncf.experimental.common.tensor_statistics.statistics import WCTensorStatistic
+from nncf.openvino.graph.metatypes import openvino_metatypes as om
+from nncf.openvino.graph.metatypes.groups import ATOMIC_ACTIVATIONS_OPERATIONS
+from nncf.openvino.graph.model_transformer import OVModelTransformer
+from nncf.openvino.graph.node_utils import convert_op
+from nncf.openvino.graph.node_utils import create_ov_const_from_tensor
 from nncf.openvino.graph.node_utils import get_const_value
 from nncf.openvino.graph.node_utils import get_weight_channel_axes
+from nncf.openvino.graph.transformations.command_creation import OVCommandCreator
+from nncf.openvino.graph.transformations.commands import OVTargetPoint
+from nncf.openvino.optimized_functions import clear_ov_model_cache
+from nncf.openvino.optimized_functions.models import OV_MODEL_CACHE
 from nncf.openvino.rt_info import dump_parameters
+from nncf.openvino.statistics.collectors import OVMaxVarianceReducer
+from nncf.openvino.statistics.collectors import OVMeanAbsMaxReducer
+from nncf.openvino.statistics.collectors import OVMeanReducer
+from nncf.openvino.statistics.collectors import OVMeanVarianceReducer
+from nncf.openvino.statistics.collectors import OVShapeReducer
 from nncf.parameters import CompressWeightsMode
+from nncf.quantization.algorithms.weight_compression.awq_patterns import get_awq_patterns
+from nncf.quantization.algorithms.weight_compression.backend import AWQAlgoBackend
+from nncf.quantization.algorithms.weight_compression.backend import MixedPrecisionAlgoBackend
 from nncf.quantization.algorithms.weight_compression.backend import WeightCompressionAlgoBackend
-from nncf.quantization.fake_quantize import calculate_scale_zero_point
-from nncf.scopes import IgnoredScope
+from nncf.quantization.algorithms.weight_compression.config import WeightCompressionConfig
+from nncf.quantization.algorithms.weight_compression.config import WeightCompressionParameters
+from nncf.quantization.algorithms.weight_compression.lora_correction import LoraCorrectionAlgorithm
+from nncf.quantization.algorithms.weight_compression.weight_lowering import compress_weight
+from nncf.tensor import Tensor
+from nncf.tensor.definitions import TensorDataType
+from nncf.tensor.functions.openvino_numeric import DTYPE_MAP_REV
 
 
 class OVWeightCompressionAlgoBackend(WeightCompressionAlgoBackend):
+    def __init__(self, model: ov.Model, name_to_node_mapping: Dict = None):
+        if name_to_node_mapping is None:
+            self.name_to_node_mapping = OVModelTransformer._get_name_to_node_mapping(model)
+        else:
+            self.name_to_node_mapping = name_to_node_mapping
+
     @property
-    def weighted_metatypes(self) -> List[OperatorMetatype]:
-        return [OVMatMulMetatype, OVEmbeddingMetatype]
+    def matmul_metatypes(self) -> List[OperatorMetatype]:
+        return [om.OVMatMulMetatype]
+
+    @property
+    def convolution_metatypes(self) -> List[OperatorMetatype]:
+        return [
+            om.OVConvolutionMetatype,
+            om.OVDepthwiseConvolutionMetatype,
+            om.OVConvolutionBackpropDataMetatype,
+            om.OVGroupConvolutionMetatype,
+            om.OVGroupConvolutionBackpropDataMetatype,
+        ]
+
+    @property
+    def embedding_metatypes(self) -> List[OperatorMetatype]:
+        return [om.OVEmbeddingMetatype]
 
     @staticmethod
-    def is_node_with_weights(node: NNCFNode) -> bool:
+    def is_node_with_weights(node: NNCFNode, graph: NNCFGraph) -> bool:
         return node.layer_attributes and node.layer_attributes.constant_attributes
 
     @staticmethod
-    def validate_params(mode: CompressWeightsMode, ignored_scope: Optional[IgnoredScope] = None) -> None:
-        pass
+    def get_reduction_axes(node_with_weight: NNCFNode, weight_port_id: int, graph: NNCFGraph) -> Optional[Tuple[int]]:
+        channel_axes = get_weight_channel_axes(node_with_weight)
+        const_shape = node_with_weight.layer_attributes.constant_attributes[weight_port_id]["shape"]
+        return get_reduction_axes(channel_axes, const_shape)
 
     @staticmethod
-    def do_compression(
-        model: ov.Model,
-        nodes_to_compress: List[NNCFNode],
-        mode: CompressWeightsMode,
-        ratio: float = None,
-        group_size: int = None,
-    ) -> ov.Model:
-        all_weight_params: List[WeightNodeParams] = []
-        quantized_nodes_ids = set()
+    def target_point(target_type: TargetType, target_node_name: str, port_id: int) -> OVTargetPoint:
+        return OVTargetPoint(target_type, target_node_name, port_id)
 
-        friendly_name_to_op_map = {op.get_friendly_name(): op for op in model.get_ops()}
+    def mean_statistic_collector(
+        self, reduction_axes: Tuple[int], subset_size: Optional[int] = None
+    ) -> TensorCollector:
+        mean_reducer = OVMeanReducer(reduction_axes, inplace=True)
+        shape_reducer = OVShapeReducer(inplace=True)
+        collector = TensorCollector(WCTensorStatistic)
+        collector.register_statistic_branch(WCTensorStatistic.MEAN_STAT, mean_reducer, NoopAggregator(subset_size))
+        collector.register_statistic_branch(WCTensorStatistic.SHAPE_STAT, shape_reducer, NoopAggregator(subset_size))
+        return collector
 
-        is_last_layer_compressed = False
-        n = len(nodes_to_compress)
-        for i, nncf_node in enumerate(nodes_to_compress):
-            weight_port_ids = nncf_node.layer_attributes.get_const_port_ids()
-            for weight_port_id in weight_port_ids:
-                weight_op_friendly_name = nncf_node.layer_attributes.constant_attributes[weight_port_id]["name"]
-                weight_node = friendly_name_to_op_map[weight_op_friendly_name]
-                if weight_node is None:
-                    continue
-                if id(weight_node) in quantized_nodes_ids:
-                    if i == n - 1:
-                        is_last_layer_compressed = True
-                    continue
-                weight_output = weight_node.output(0)
+    @staticmethod
+    def get_activation_port_id(node: NNCFNode, nncf_graph: NNCFGraph) -> int:
+        if node.layer_attributes.input_attributes["transpose"]:
+            msg = "Transposed input is not supported"
+            raise nncf.UnsupportedModelError(msg)
+        constant_ports = node.layer_attributes.get_const_port_ids()
+        activation_ports = [
+            e.input_port_id for e in nncf_graph.get_input_edges(node) if e.input_port_id not in constant_ports
+        ]
+        assert len(activation_ports) == 1
+        return activation_ports[0]
 
-                original_weight_dtype = weight_output.get_element_type().to_dtype()
-                if original_weight_dtype not in [np.float32, np.float16, np.float64]:
-                    continue
-                const_shape = nncf_node.layer_attributes.constant_attributes[weight_port_id]["shape"]
-                channel_axes = get_weight_channel_axes(nncf_node, weight_port_id)
-                reduction_axes = get_channel_agnostic_reduction_axes(channel_axes, const_shape)
-                if isinstance(reduction_axes, tuple) and len(reduction_axes) != 1:
-                    nncf_logger.warning(
-                        f"Weight compression expects a single reduction axes, but given {len(reduction_axes)}. "
-                        f"Weight shape: {const_shape}, reduction axes: {reduction_axes}, "
-                        f"node name: {nncf_node.node_name}. The node won't be quantized."
-                    )
-                    continue
-                reduction_axis = reduction_axes[0] if isinstance(reduction_axes, tuple) else reduction_axes
+    @staticmethod
+    def get_weight_names_and_port_ids(node: NNCFNode, graph: NNCFGraph) -> List[Tuple[str, int]]:
+        result = []
+        for weight_port_id in node.layer_attributes.get_const_port_ids():
+            weight_name = node.layer_attributes.constant_attributes[weight_port_id]["name"]
+            result.append((weight_name, weight_port_id))
+        return result
 
-                fq_name = f"{weight_op_friendly_name}/fq_weights_{weight_port_id}"
-                num_weights = np.prod(const_shape)
-                weight_params = WeightNodeParams(
-                    reduction_axis,
-                    num_weights,
-                    fq_name,
-                    weight_node,
-                    original_weight_dtype,
-                    metatype=nncf_node.metatype,
-                )
-                all_weight_params.append(weight_params)
-                quantized_nodes_ids.add(id(weight_node))
+    def get_weight(self, node_with_weight: NNCFNode, weight_port_id: int, model: ov.Model, graph: NNCFGraph) -> Tensor:
+        weight_name = node_with_weight.layer_attributes.constant_attributes[weight_port_id]["name"]
+        weight_node = self.name_to_node_mapping[weight_name]
+        weight_tensor = get_const_value(weight_node)
+        return Tensor(weight_tensor)
 
-        internal_weight_params = all_weight_params
-        if mode != CompressWeightsMode.INT8:
-            internal_weight_params = list(filter(lambda wp: wp.metatype != OVEmbeddingMetatype, all_weight_params))
-            if not is_last_layer_compressed:
-                internal_weight_params = internal_weight_params[:-1]
-            primary_config = WeightCompressionConfig(mode=mode, group_size=group_size)
-            _assign_mixed_precision(internal_weight_params, ratio, primary_config)
-        nncf_logger.info(_get_bitwidth_distribution_str(all_weight_params, internal_weight_params))
+    def get_weight_dtype(
+        self, node_with_weight: NNCFNode, weight_port_id: int, model: ov.Model, graph: NNCFGraph
+    ) -> TensorDataType:
+        ov_type_name = node_with_weight.layer_attributes.constant_attributes[weight_port_id]["dtype"]
+        ov_type = getattr(ov.Type, ov_type_name)
+        return DTYPE_MAP_REV[ov_type]
 
-        for wp in track(all_weight_params, description="Applying Weight Compression"):
-            weight_node = wp.weight_node
-            original_weight_dtype = wp.original_weight_dtype
+    @staticmethod
+    def get_weight_shape(node_with_weight: NNCFNode, weight_port_id: int, graph: NNCFGraph) -> Tuple:
+        return node_with_weight.layer_attributes.constant_attributes[weight_port_id]["shape"]
 
-            weight_output = weight_node.output(0)
-            weight_name = weight_node.get_friendly_name()
-            target_inputs = weight_output.get_target_inputs()
+    def set_weight(
+        self, node_with_weight: NNCFNode, weight_port_id: int, model: ov.Model, graph: NNCFGraph, weight: Tensor
+    ):
+        node_with_const = self.name_to_node_mapping[node_with_weight.node_name]
 
-            weight = get_const_value(weight_node)
-            config = wp.compression_config
-            if config.mode == CompressWeightsMode.NF4:
-                original_shape = weight.shape
-                norm_weight, scale = _get_norm_weight_and_nf4_scale(weight, wp.reduction_axis, group_size)
-                compressed_const = opset.constant(norm_weight, dtype=ov.Type.nf4, name=weight_name)
-                convert = opset.convert(compressed_const, original_weight_dtype)
-                mul = opset.multiply(convert, scale.astype(original_weight_dtype), name=wp.fq_name)
-                if config.group_size != -1:
-                    mul = opset.reshape(mul, output_shape=original_shape, special_zero=False)
-                last_output = mul.output(0)
-            else:
-                original_shape = weight.shape
-                compressed_weights, scale, zero_point = _do_integer_quantization(weight, wp.reduction_axis, config)
-                compression_type = np.uint8 if config.num_bits == 8 else ov.Type.u4
-                compressed_weights_node = opset.constant(compressed_weights, dtype=compression_type, name=weight_name)
-                convert_weights_node = opset.convert(compressed_weights_node, original_weight_dtype)
-                zero_point_node = opset.constant(zero_point, dtype=compression_type, name=f"{weight_name}/ZP")
-                convert_zp_node = opset.convert(zero_point_node, original_weight_dtype)
-                sub = opset.subtract(convert_weights_node, convert_zp_node)
-                mul = opset.multiply(sub, scale.astype(original_weight_dtype), name=wp.fq_name)
-                if config.group_size != -1:
-                    mul = opset.reshape(mul, output_shape=original_shape, special_zero=False)
-                last_output = mul.output(0)
+        const_port = node_with_const.input(weight_port_id)
+        const_node = node_with_const.input_value(weight_port_id).get_node()
 
-            for target_input in target_inputs:
-                target_input.replace_source_output(last_output)
+        shared_memory = True
+        if const_node.get_element_type() == ov.Type.bf16:
+            # Shared memory does not work for BF16 precision
+            shared_memory = False
 
-        dump_parameters(
-            model,
-            parameters={
-                "mode": mode.value,
-                "group_size": group_size,
-                "ratio": ratio,
-            },
-            algo_name="weight_compression",
+        new_const_node = ov.runtime.op.Constant(weight.data, shared_memory=shared_memory)
+        new_const_node.set_friendly_name(const_node.get_friendly_name())
+        const_port.replace_source_output(new_const_node.output(0))
+
+        const_name = node_with_weight.layer_attributes.constant_attributes[weight_port_id]["name"]
+        self.name_to_node_mapping[const_name] = new_const_node
+
+        new_output = new_const_node.output(0)
+        for target_input in const_node.output(0).get_target_inputs():
+            target_input.replace_source_output(new_output)
+
+        del const_node
+
+    def insert_adapters(
+        self, wc_params: WeightCompressionParameters, lora_A: Tensor, lora_B: Tensor, int8_lora: bool
+    ) -> None:
+        input_node = self.name_to_node_mapping[wc_params.node_with_weight.node_name].input_value(0)
+        activation_dtype = input_node.get_element_type()
+        should_add_convert_node = activation_dtype != ov.Type.f16
+        mm_node = self.name_to_node_mapping[wc_params.node_with_weight.node_name]
+
+        if int8_lora:
+            const_node_name = wc_params.node_with_weight.node_name
+            int8_compression_config = WeightCompressionConfig(mode=CompressWeightsMode.INT8_ASYM, group_size=-1)
+            A_W, _ = self._create_compression_subgraph(
+                weight=lora_A,
+                compression_config=int8_compression_config,
+                reduction_axes=wc_params.reduction_axes,
+                const_node_name=const_node_name + "_lora_A",
+                weight_port_id=1,
+                const_dtype=activation_dtype,
+                should_add_convert_node=should_add_convert_node,
+            )
+            B_W, _ = self._create_compression_subgraph(
+                weight=lora_B,
+                compression_config=int8_compression_config,
+                reduction_axes=wc_params.reduction_axes,
+                const_node_name=const_node_name + "_lora_B",
+                weight_port_id=1,
+                const_dtype=activation_dtype,
+                should_add_convert_node=should_add_convert_node,
+            )
+        else:
+            A_W = opset.constant(lora_A.data)
+            B_W = opset.constant(lora_B.data)
+
+        A_MM = opset.matmul(input_node, A_W, transpose_a=False, transpose_b=True)
+        B_MM = opset.matmul(A_MM, B_W, transpose_a=False, transpose_b=True)
+
+        node_output_port = mm_node.output(0)
+        node_output_source_ports = node_output_port.get_target_inputs()
+        add = opset.add(mm_node, B_MM)
+        for node_output_source_port in node_output_source_ports:
+            node_output_source_port.replace_source_output(add.output(0))
+
+    def _create_compression_subgraph(
+        self,
+        weight: Tensor,
+        compression_config: WeightCompressionConfig,
+        reduction_axes: Tuple[int, ...],
+        const_node_name: str,
+        weight_port_id: int,
+        const_dtype,
+        should_add_convert_node: bool,
+        layer_scales: Optional[Tensor] = None,
+        layer_zero_points: Optional[Tensor] = None,
+    ):
+        scale_dtype = ov.Type.f16
+        if compression_config.mode == CompressWeightsMode.NF4:
+            compression_dtype = ov.Type.nf4
+        elif compression_config.mode == CompressWeightsMode.E2M1:
+            compression_dtype = ov.Type.f4e2m1
+            scale_dtype = ov.Type.f8e8m0
+        elif compression_config.mode == CompressWeightsMode.INT4_SYM:
+            compression_dtype = ov.Type.i4
+        elif compression_config.mode == CompressWeightsMode.INT4_ASYM:
+            compression_dtype = ov.Type.u4
+        elif compression_config.mode == CompressWeightsMode.INT8_SYM:
+            compression_dtype = ov.Type.i8
+        elif compression_config.mode == CompressWeightsMode.INT8_ASYM:
+            compression_dtype = ov.Type.u8
+        else:
+            msg = f"{compression_config.mode.value} is not supported."
+            raise nncf.ParameterNotSupportedError(msg)
+
+        original_shape = weight.shape
+        with disable_results_caching(OV_MODEL_CACHE):
+            compressed_weight = compress_weight(
+                weight,
+                reduction_axes,
+                compression_config,
+                layer_scales,
+                layer_zero_points,
+            )
+
+        compressed_const = create_ov_const_from_tensor(
+            compressed_weight.tensor, compression_dtype, name=const_node_name
         )
+        converted_const = opset.convert(compressed_const, ov.Type.f16)
+
+        if compressed_weight.zero_point is not None:
+            zero_point_const = create_ov_const_from_tensor(
+                compressed_weight.zero_point, compression_dtype, name=f"{const_node_name}/zero_point"
+            )
+            zero_point_const = opset.convert(zero_point_const, ov.Type.f16)
+            converted_const = opset.subtract(
+                converted_const, zero_point_const, name=f"{const_node_name}/zero_point/subtract"
+            )
+
+        scale_const = create_ov_const_from_tensor(compressed_weight.scale, scale_dtype, name=f"{const_node_name}/scale")
+        scale_const = convert_op(scale_const, ov.Type.f16)
+
+        mul = opset.multiply(
+            converted_const,
+            scale_const,
+            name=f"{const_node_name}/fq_weights_{weight_port_id}",
+        )
+
+        if compression_config.group_size != -1:
+            mul = opset.reshape(mul, output_shape=original_shape, special_zero=False)
+
+        if should_add_convert_node:
+            mul = opset.convert(mul, const_dtype, name=f"{const_node_name}/fq_weights_{weight_port_id}/convert")
+        return mul, compressed_weight
+
+    def transform_model(
+        self,
+        model: ov.Model,
+        graph: NNCFGraph,
+        weight_compression_parameters: Iterable[WeightCompressionParameters],
+        precomputed_scales: Dict[str, Tensor] = None,
+        precomputed_zero_points: Dict[str, Tensor] = None,
+        lora_correction_algo: LoraCorrectionAlgorithm = None,
+    ) -> ov.Model:
+        for wc_params in weight_compression_parameters:
+            const_attributes = wc_params.node_with_weight.layer_attributes.constant_attributes[wc_params.weight_port_id]
+            const_node_name = const_attributes["name"]
+            const_node = self.name_to_node_mapping[const_node_name]
+            const_node_output = const_node.output(0)
+            const_dtype = const_node_output.get_element_type()
+            weight = get_const_value(const_node, cast_bf16_to_fp32=False)
+            # Creation of ov.Tensor is required for two reasons:
+            #   1. To be able to process BF16 weight properly
+            #   2. To indicate that it is allowed for the compressed constant to be returned as int4/uint4 if needed
+            weight = ov.Tensor(weight, weight.shape, const_dtype)
+            weight = Tensor(weight)
+
+            should_add_convert_node = False
+            if const_dtype != ov.Type.f16:
+                for inp in const_node_output.get_target_inputs():
+                    if inp.get_node().get_type_name() != "Convert":
+                        should_add_convert_node = True
+                        break
+
+            layer_scales = None if precomputed_scales is None else precomputed_scales.get(wc_params.weight_name)
+            layer_zero_points = (
+                None if precomputed_zero_points is None else precomputed_zero_points.get(wc_params.weight_name)
+            )
+            mul, compressed_weight = self._create_compression_subgraph(
+                weight=weight,
+                compression_config=wc_params.compression_config,
+                reduction_axes=wc_params.reduction_axes,
+                const_node_name=const_node_name,
+                weight_port_id=wc_params.weight_port_id,
+                const_dtype=const_dtype,
+                should_add_convert_node=should_add_convert_node,
+                layer_scales=layer_scales,
+                layer_zero_points=layer_zero_points,
+            )
+
+            mul_output = mul.output(0)
+            for target_input in const_node.output(0).get_target_inputs():
+                target_input.replace_source_output(mul_output)
+            if lora_correction_algo is not None and lora_correction_algo.is_applicable(wc_params):
+                # These tensors can potentially be in ov backend
+                weight = weight.as_numpy_tensor()
+                compressed_weight.tensor = compressed_weight.tensor.as_numpy_tensor()
+                if compressed_weight.zero_point is not None:
+                    compressed_weight.zero_point = compressed_weight.zero_point.as_numpy_tensor()
+                adapters = lora_correction_algo.calculate_adapters(weight, compressed_weight, wc_params)
+                self.insert_adapters(wc_params, *adapters, int8_lora=lora_correction_algo.use_int8_adapters)
+
+        # reset name_to_node_mapping
+        self.name_to_node_mapping = None
+
+        clear_ov_model_cache()
+
         return model
 
+    @staticmethod
+    def dump_parameters(
+        model: ov.Model, parameters: Dict, algo_name: Optional[str] = "quantization", path: Optional[List] = None
+    ) -> None:
+        dump_parameters(model, parameters, algo_name, path)
 
-TWeightType = TypeVar("TWeightType")
+    @staticmethod
+    def get_filter_fn_for_statistics(activation_port_id: int, algorithm_key: str) -> Callable[[StatisticPoint], bool]:
+        def filter_func(point: StatisticPoint) -> bool:
+            return (
+                algorithm_key in point.algorithm_to_tensor_collectors
+                and point.target_point.type == TargetType.POST_LAYER_OPERATION
+                and point.target_point.port_id == activation_port_id
+            )
 
-
-@dataclass
-class WeightCompressionConfig:
-    """
-    Information on how to compress (quantize) a specific weight.
-
-    :param mode: Defines a mode for weight compression. Defaults to INT8 mode.
-    :param group_size: Number of weights (e.g. 128) in the channel dimension that share quantization parameters (scale).
-        The value -1 means no grouping. Defaults to -1.
-    """
-
-    mode: Optional[CompressWeightsMode] = CompressWeightsMode.INT8
-    group_size: Optional[int] = -1
-
-    @property
-    def num_bits(self):
-        """
-        :return: number of bits that is used for storing a single quantized value in the given mode.
-        """
-        return 8 if self.mode == CompressWeightsMode.INT8 else 4
+        return filter_func
 
 
-@dataclass
-class WeightNodeParams:
-    """
-    Information about weight node in the ov.Model that is useful for weight compression.
+class OVAWQAlgoAlgoBackend(AWQAlgoBackend, OVWeightCompressionAlgoBackend):
+    @staticmethod
+    def get_awq_patterns():
+        return get_awq_patterns(om.OVMatMulMetatype, om.OVMultiplyMetatype, ATOMIC_ACTIVATIONS_OPERATIONS)
 
-    :param reduction_axis: Axis, along which to reduce (collect) different statistics (e.g. min, max).
-    :param num_weights: Number of elements in the weight array.
-    :param fq_name: Name for the inserted weight compression operation.
-    :param weight_node: The weight node itself.
-    :param original_weight_dtype: Type of elements in the weight array.
-    :param compression_config: Configuration of weight compression for the weight node.
-    :param metatype: Metatype of the corresponding operation with weight.
-    """
-
-    reduction_axis: int
-    num_weights: int
-    fq_name: str
-    weight_node: ov.Node
-    original_weight_dtype: TWeightType
-    compression_config = WeightCompressionConfig()
-    metatype: OperatorMetatype = None
-
-
-def _do_integer_quantization(
-    weight: np.ndarray, reduction_axis: int, config: WeightCompressionConfig
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    The method quantizes the given weights to integer data type in accordance with the compression config.
-    The config defines a quantization mode:
-        INT8 mode refers to unsigned int8 asymmetric weight compression - quantization to [0, 255] range.
-        INT4_ASYM mode refers to unsigned int4 asymmetric weight compression with a typical non-fixed zero-point -
-            quantization to [0, 15] range.
-        INT4_SYM mode refers to unsigned int4 symmetric weight compression with a fixed zero point equals to 8 -
-            quantization to [0, 15] range.
-        NF4 mode requires a dedicated procedure and it is not supported in this method.
-    One of the parameter of compression config is a group size. Quantization is per-channel, if group size equals to -1,
-    otherwise it's per-group, i.e. group size number of weights in the channel dimension share quantization parameters
-    (scales).
-
-    :param weight: Weight array to compress.
-    :param reduction_axis: Axis, along which to reduce (collect) different statistics (e.g. min, max).
-    :param config: Information on how to compress (quantize) a specific weight.
-    :return: The compressed weights, scale and zero point that was used for its quantization.
-    """
-    mode = config.mode
-    assert mode != CompressWeightsMode.NF4, "The function supports integer quantization only"
-    group_size = config.group_size
-    num_bits = config.num_bits
-
-    level_low = 0
-    level_high = 2**num_bits - 1
-
-    if group_size != -1:
-        # weights are reshaped from [a1, r, a2] to [a1, r//gs, gs, a2]
-        weight, reduction_axis = _reshape_weights_for_grouped_quantization(weight, reduction_axis, group_size)
-
-    if mode in [CompressWeightsMode.INT8, CompressWeightsMode.INT4_ASYM]:
-        min_values = np.min(weight, axis=reduction_axis, keepdims=True)  # [a1, r, a2] -> [a1, 1, a2]
-        max_values = np.max(weight, axis=reduction_axis, keepdims=True)  # [a1, r, a2] -> [a1, 1, a2]
-        scale, zero_point = calculate_scale_zero_point(
-            min_values, max_values, level_low, level_high, narrow_range=False
-        )
-    else:
-        scale = np.max(np.abs(weight), axis=reduction_axis, keepdims=True)  # [a1, r//gs, 1, a2]
-        level_low_sym = -(2 ** (num_bits - 1))
-        level_high_sym = 2 ** (num_bits - 1) - 1
-        scale = scale / level_high_sym
-        zero_point = np.array([-level_low_sym])
-
-    eps = np.finfo(weight.dtype).eps
-    # NOTE: adding machine epsilon to avoid division by zero
-    scale[np.abs(scale) < eps] = eps
-    compressed_weights = np.round(weight / scale + zero_point)
-    compressed_weights = np.clip(compressed_weights, level_low, level_high).astype(np.uint8)
-    return compressed_weights, scale, zero_point
-
-
-def _get_integer_quantization_error(weight: np.ndarray, reduction_axis: int, config: WeightCompressionConfig) -> float:
-    """
-    Calculates a quantity characterizing the difference between floating point weights and fake quantized
-    (compressed and decompressed) to integer ones.
-
-    :param weight: Weight array to compress.
-    :param reduction_axis: Axis, along which to reduce (collect) different statistics (e.g. min, max).
-    :param config: Information on how to compress (quantize) a specific weight.
-    :return: The quantity characterizing the error of integer quantization.
-    """
-    orig_shape = weight.shape
-    compressed_weights, scale, zero_point = _do_integer_quantization(weight, reduction_axis, config)
-
-    decompressed_weight = compressed_weights.astype(dtype=scale.dtype)
-    decompressed_weight = (compressed_weights - zero_point) * scale
-
-    decompressed_weight = decompressed_weight.reshape(orig_shape)
-    diff = (decompressed_weight - weight) ** 2
-    layer_err = np.mean(diff, axis=reduction_axis)
-    val = np.max(layer_err)
-    return val
-
-
-def _reshape_weights_for_grouped_quantization(
-    weight: np.ndarray, reduction_axis: int, group_size: int
-) -> Tuple[np.ndarray, int]:
-    """
-    Reshapes weights for group-wise quantization and return a new reduction axis for collecting statistics per group
-    dimension. Having weights with shapes [c_out, c_in] and group size = 128, shape of reshaped weights is
-    [c_out, c_in // 128, 128].
-
-    :param weight: Weight array to compress.
-    :param reduction_axis: Axis, along which to reduce (collect) different statistics (e.g. min, max).
-    :param group_size: Number of weights (e.g. 128) in the channel dimension that share quantization parameters (scale).
-    :return: reshaped weights and new reduction axis.
-    """
-    assert group_size != -1
-    assert isinstance(reduction_axis, int)
-    channel_size = weight.shape[reduction_axis]
-    if channel_size % group_size != 0:
-        raise RuntimeError(f"Channel size {channel_size} should be divisible by size of group {group_size}")
-
-    num_groups_per_channel = channel_size // group_size
-    shape = list(weight.shape)  # [a1, r, a2] - "r" refers to number of channels along reduction axis
-    shape[reduction_axis : reduction_axis + 1] = (num_groups_per_channel, group_size)
-    reshaped_weight = weight.reshape(shape)
-    reduction_axis += 1
-    return reshaped_weight, reduction_axis
-
-
-def _get_norm_weight_and_nf4_scale(
-    weight: np.ndarray, reduction_axis: int, group_size: int = -1
-) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Calculates scale for nf4 quantization and normalizes weights by the scale.
-    Weights are reshaped in case of positive value of group size.
-
-    :param weight: Weight array to compress.
-    :param reduction_axis: Axis, along which to reduce (collect) different statistics (e.g. min, max).
-    :param group_size: Number of weights (e.g. 128) in the channel dimension that share quantization parameters (scale).
-        The value -1 means no grouping. Defaults to -1.
-    :return: Normalized weights and nf4 scale.
-    """
-    if group_size != -1:
-        # weights are reshaped: [a1, r, a2] -> [a1, r//gs, gs, a2]
-        weight, reduction_axis = _reshape_weights_for_grouped_quantization(weight, reduction_axis, group_size)
-        scale = np.max(np.abs(weight), axis=reduction_axis, keepdims=True)  # [a1, r//gs, 1, a2]
-    else:
-        scale = np.max(np.abs(weight), axis=reduction_axis, keepdims=True)  # [a1, 1, a2]
-    eps = np.finfo(weight.dtype).eps
-    # NOTE: adding machine epsilon to avoid division by zero
-    scale[np.abs(scale) < eps] = eps
-    norm_weight = weight / scale
-    return norm_weight, scale
-
-
-def _proportion_str(num_weights_list: List[int], total_num_weights: int, total_num_params: int) -> str:
-    percentage = sum(num_weights_list) / max(total_num_weights, 1) * 100
-    return f"{percentage:.0f}% ({len(num_weights_list)} / {total_num_params})"
-
-
-def _get_bitwidth_distribution_str(all_params: List[WeightNodeParams], internal_params: List[WeightNodeParams]) -> str:
-    """
-    Generates a table that shows the ratio of weights quantized to different number of bits.
-
-    :param all_params: List of information about each weight node.
-    :param internal_params: List of information about weight nodes that are considered for mixed precision.
-    :return: A string containing the table.
-    """
-    not_internal_params = [wp for wp in all_params if wp not in internal_params]
-    num_bits_vs_num_weights_map = {}
-    for data in internal_params:
-        num_bits = data.compression_config.num_bits
-        n_internal, n_internal = num_bits_vs_num_weights_map.get(num_bits, ([], []))
-        n_internal.append(data.num_weights)
-        num_bits_vs_num_weights_map[num_bits] = (n_internal, n_internal)
-    for data in not_internal_params:
-        num_bits = data.compression_config.num_bits
-        n_total, n_internal = num_bits_vs_num_weights_map.get(num_bits, ([], []))
-        n_total.append(data.num_weights)
-        num_bits_vs_num_weights_map[num_bits] = (n_total, n_internal)
-    num_internal_weights = sum(ws.num_weights for ws in internal_params)
-    num_internal_params = len(internal_params)
-    total_num_weights = num_internal_weights + sum(ws.num_weights for ws in not_internal_params)
-    num_params = len(all_params)
-    num_bits_vs_num_weights_map = OrderedDict(sorted(num_bits_vs_num_weights_map.items(), reverse=True))
-    # Table creation
-    header = ["Num bits (N)", "% all parameters (layers)", "% internal parameters (layers)"]
-    rows = []
-    for bitwidth, (n_total, n_internal) in num_bits_vs_num_weights_map.items():
-        rows.append(
-            [
-                bitwidth,
-                _proportion_str(n_total, total_num_weights, num_params),
-                _proportion_str(n_internal, num_internal_weights, num_internal_params),
-            ]
+    @staticmethod
+    def scale_insertion_command(source_node, next_nodes, source_node_output_port, scale):
+        return OVCommandCreator.multiply_insertion_command(
+            source_node, next_nodes, source_node_output_port, scale, f"{source_node.node_name}/awq_mul"
         )
 
-    table = create_table(header, rows)
-    pretty_string = f"Statistics of the bitwidth distribution:\n{table}"
-    return pretty_string
 
+class OVMixedPrecisionAlgoBackend(MixedPrecisionAlgoBackend, OVWeightCompressionAlgoBackend):
+    @staticmethod
+    def mean_variance_statistic_collector(
+        reduction_axes: Tuple[int], subset_size: Optional[int] = None
+    ) -> TensorCollector:
+        reducer = OVMeanVarianceReducer(reduction_axes, inplace=True)
+        aggregator = MeanAggregator(num_samples=subset_size)
+        collector = TensorCollector(MeanVarianceTensorStatistic)
+        collector.register_statistic_branch(MeanVarianceTensorStatistic.MEAN_VARIANCE_STAT, reducer, aggregator)
+        return collector
 
-def _assign_mixed_precision(
-    internal_weight_params: List[WeightNodeParams], ratio: float, primary_config: WeightCompressionConfig
-) -> None:
-    """
-    Assigns mixed quantization scheme (e.g. uniform int8 or non-uniform nf4) for weights based on some criteria.
-    :param internal_weight_params: List of information about internal weight nodes. Only internal nodes are considered
-        for mixed precision. The quantization scheme is added to this info.
-    :param ratio: The ratio between primary and backup precisions (e.g. 0.9 means 90% of layers quantized to NF4
-        and the rest to INT8).
-    :param primary_config: Information on how to compress (quantize) weights to primary precision.
-    :return: None.
-    """
-    if ratio == 1:
-        for weight_param in internal_weight_params:
-            weight_param.compression_config = primary_config
-        return
-    errors = []
-    num_internal_weights = 0
-    for weight_param in track(internal_weight_params, description="Searching for Mixed-Precision Configuration"):
-        weight = get_const_value(weight_param.weight_node)
-        backup_config = weight_param.compression_config
-        reduction_axis = weight_param.reduction_axis
-        backup_error = _get_integer_quantization_error(weight, reduction_axis, backup_config)
-        eps = np.finfo(weight.dtype).eps
-        error = 1 / (backup_error + eps)
-        errors.append(error)
-        num_internal_weights += weight_param.num_weights
-    indexes_of_layers_in_ascending_order_of_errors = [
-        i[0] for i in sorted(enumerate(errors), reverse=False, key=lambda x: x[1])
-    ]
-    num_weights_in_4bit = 0
-    for index in indexes_of_layers_in_ascending_order_of_errors:
-        weight_param = internal_weight_params[index]
-        current_ratio = (num_weights_in_4bit + weight_param.num_weights) / num_internal_weights
-        if current_ratio >= ratio:
-            break
-        weight_param.compression_config = primary_config
-        num_weights_in_4bit += weight_param.num_weights
+    @staticmethod
+    def max_variance_statistic_collector(
+        reduction_axes: Tuple[int], subset_size: Optional[int] = None
+    ) -> TensorCollector:
+        reducer = OVMaxVarianceReducer(reduction_axes, inplace=True)
+        aggregator = MeanAggregator(num_samples=subset_size)
+        collector = TensorCollector(MaxVarianceTensorStatistic)
+        collector.register_statistic_branch(MaxVarianceTensorStatistic.MAX_VARIANCE_STAT, reducer, aggregator)
+        return collector
+
+    @staticmethod
+    def mean_abs_max_statistic_collector(
+        reduction_axes: Tuple[int], subset_size: Optional[int] = None
+    ) -> TensorCollector:
+        reducer = OVMeanAbsMaxReducer(reduction_axes, inplace=True)
+        aggregator = MeanAggregator(num_samples=subset_size)
+        collector = TensorCollector(MeanMagnitudeTensorStatistic)
+        collector.register_statistic_branch(MeanMagnitudeTensorStatistic.MEAN_MAGNITUDE_STAT, reducer, aggregator)
+        return collector

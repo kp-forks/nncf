@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -37,7 +37,7 @@ from tests.torch.nas.test_elastic_width import TwoConvAddConvTestModel
 from tests.torch.nas.test_elastic_width import TwoSequentialConvBNTestModel
 
 
-@pytest.yield_fixture()
+@pytest.fixture
 def _nncf_caplog(caplog):
     nncf_logger.propagate = True
     yield caplog

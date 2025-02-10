@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -13,8 +13,12 @@ import sys
 
 import torch
 
+import nncf
+from tests.cross_fw.install.common import load_nncf_modules
+
 if len(sys.argv) != 3:
-    raise RuntimeError("Must be run with an execution type as argument (either 'cpu' or 'gpu') and package type")
+    msg = "Must be run with an execution type as argument (either 'cpu' or 'gpu') and package type"
+    raise nncf.ValidationError(msg)
 execution_type = sys.argv[1]
 package_type = sys.argv[2]
 
@@ -32,31 +36,36 @@ threshold_tensor = torch.zeros([1, 1, 1, 1])
 levels = 256
 
 if execution_type == "cpu":
-    from nncf.torch.binarization.extensions import BinarizedFunctionsCPU
     from nncf.torch.quantization.extensions import QuantizedFunctionsCPU
 
     output_tensor = QuantizedFunctionsCPU.get("Quantize_forward")(
         input_tensor, input_low_tensor, input_high_tensor, levels
     )
-    output_tensor = BinarizedFunctionsCPU.get("ActivationBinarize_forward")(
-        output_tensor, scale_tensor, threshold_tensor
-    )
-    output_tensor = BinarizedFunctionsCPU.get("WeightBinarize_forward")(output_tensor, True)
 elif execution_type == "gpu":
     input_tensor = input_tensor.cuda()
     input_low_tensor = input_low_tensor.cuda()
     input_high_tensor = input_high_tensor.cuda()
     scale_tensor = scale_tensor.cuda()
     threshold_tensor = threshold_tensor.cuda()
-    from nncf.torch.binarization.extensions import BinarizedFunctionsCUDA
     from nncf.torch.quantization.extensions import QuantizedFunctionsCUDA
 
     output_tensor = QuantizedFunctionsCUDA.get("Quantize_forward")(
         input_tensor, input_low_tensor, input_high_tensor, levels
     )
-    output_tensor = BinarizedFunctionsCUDA.get("ActivationBinarize_forward")(
-        output_tensor, scale_tensor, threshold_tensor
-    )
-    output_tensor = BinarizedFunctionsCUDA.get("WeightBinarize_forward")(output_tensor, True)
 else:
-    raise RuntimeError(f"Invalid execution type {execution_type} (expected 'cpu' or 'gpu')!")
+    msg = f"Invalid execution type {execution_type} (expected 'cpu' or 'gpu')!"
+    raise nncf.ValidationError(msg)
+
+EXCLUDED_MODULES_PATTERNS = (
+    "nncf\\.openvino.*",
+    "nncf\\.tensorflow.*",
+    "nncf\\.onnx.*",
+    "nncf\\.experimental\\.tensorflow.*",
+    "nncf\\.experimental\\.openvino.*",
+    "nncf\\.experimental\\.onnx.*",
+    "^(?!nncf(?:\\.experimental)*\\.torch.*?\\.).*?openvino_[^\\.]*",
+    "^(?!nncf(?:\\.experimental)*\\.torch.*?\\.).*?onnx_[^\\.]*",
+    "^(?!nncf(?:\\.experimental)*\\.torch.*?\\.).*?tf_[^\\.]*",
+)
+
+load_nncf_modules(EXCLUDED_MODULES_PATTERNS)
