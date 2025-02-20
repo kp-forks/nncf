@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -11,12 +11,12 @@
 import copy
 import pathlib
 from collections import defaultdict
-from typing import Dict
+from typing import Dict, Union
 
-import networkx as nx
+import networkx as nx  # type: ignore
 
 
-def write_dot_graph(G: nx.DiGraph, path: pathlib.Path):
+def write_dot_graph(G: nx.DiGraph, path: Union[pathlib.Path, str]) -> None:
     # NOTE: writing dot files with colons even in labels or other node/edge/graph attributes leads to an
     # error. See https://github.com/networkx/networkx/issues/5962. If `relabel` is True in this function,
     # then the colons (:) will be replaced with (^) symbols.
@@ -47,21 +47,21 @@ RESERVED_CHAR = ":"
 REPLACEMENT_CHAR = "^"
 
 
-def _maybe_escape_colons_in_attrs(data: Dict):
+def _maybe_escape_colons_in_attrs(data: Dict[str, str]) -> None:
     for attr_name in data:
-        attr_val = data[attr_name]
+        attr_val = str(data[attr_name])
         if RESERVED_CHAR in attr_val and not (attr_val[0] == '"' or attr_val[-1] == '"'):
             data[attr_name] = '"' + data[attr_name] + '"'  # escaped colons are allowed
 
 
-def _unescape_colons_in_attrs_with_colons(data: Dict):
+def _unescape_colons_in_attrs_with_colons(data: Dict[str, str]) -> None:
     for attr_name in data:
         attr_val = data[attr_name]
         if RESERVED_CHAR in attr_val and (attr_val[0] == '"' and attr_val[-1] == '"'):
             data[attr_name] = data[attr_name][1:-1]
 
 
-def _remove_cosmetic_labels(graph: nx.DiGraph):
+def _remove_cosmetic_labels(graph: nx.DiGraph) -> None:
     for node_name, node_data in graph.nodes(data=True):
         if "label" in node_data:
             label = node_data["label"]
@@ -69,7 +69,7 @@ def _remove_cosmetic_labels(graph: nx.DiGraph):
                 del node_data["label"]
 
 
-def _add_cosmetic_labels(graph: nx.DiGraph, relabeled_node_mapping: Dict[str, str]):
+def _add_cosmetic_labels(graph: nx.DiGraph, relabeled_node_mapping: Dict[str, str]) -> None:
     for original_name, dot_name in relabeled_node_mapping.items():
         node_data = graph.nodes[dot_name]
         if "label" not in node_data:
@@ -85,7 +85,6 @@ def relabel_graph_for_dot_visualization(nx_graph: nx.Graph, from_reference: bool
     :param nx_graph: NetworkX graph to visualize via dot.
     :return: NetworkX graph with reserved symbols in nodes keys replaced.
     """
-
     nx_graph = copy.deepcopy(nx_graph)
 
     # .dot format reserves ':' character in node names
@@ -98,9 +97,11 @@ def relabel_graph_for_dot_visualization(nx_graph: nx.Graph, from_reference: bool
         __CHARACTER_REPLACE_FROM = REPLACEMENT_CHAR
         __CHARACTER_REPLACE_TO = RESERVED_CHAR
 
-    hits = defaultdict(lambda: 0)
+    hits: Dict[str, int] = defaultdict(lambda: 0)
     mapping = {}
     for original_name in nx_graph.nodes():
+        if not isinstance(original_name, str):
+            continue
         dot_name = original_name.replace(__CHARACTER_REPLACE_FROM, __CHARACTER_REPLACE_TO)
         hits[dot_name] += 1
         if hits[dot_name] > 1:

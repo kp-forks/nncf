@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -11,8 +11,9 @@
 
 from abc import ABC
 from abc import abstractmethod
-from typing import Dict
+from typing import Dict, Union
 
+import nncf
 from nncf.api.compression import CompressionAlgorithmController
 from nncf.common.accuracy_aware_training.runner import BaseAccuracyAwareTrainingRunner
 from nncf.common.accuracy_aware_training.runner import BaseAdaptiveCompressionLevelTrainingRunner
@@ -38,7 +39,7 @@ class EarlyExitTrainingRunnerCreator(TrainingRunnerCreator):
 
     def __init__(
         self,
-        accuracy_aware_training_params: Dict[str, object],
+        accuracy_aware_training_params: Dict[str, Union[float, int]],
         compression_controller: CompressionAlgorithmController,
         uncompressed_model_accuracy: float,
         verbose: bool,
@@ -79,7 +80,8 @@ class EarlyExitTrainingRunnerCreator(TrainingRunnerCreator):
                 self.dump_checkpoints,
                 self.lr_updates_needed,
             )
-        raise RuntimeError("Got an unsupported value of nncf_backend")
+        msg = "Got an unsupported value of nncf_backend"
+        raise nncf.UnsupportedBackendError(msg)
 
 
 class AdaptiveCompressionLevelTrainingRunnerCreator(TrainingRunnerCreator):
@@ -89,7 +91,7 @@ class AdaptiveCompressionLevelTrainingRunnerCreator(TrainingRunnerCreator):
 
     def __init__(
         self,
-        accuracy_aware_training_params: Dict[str, object],
+        accuracy_aware_training_params: Dict[str, Union[float, int]],
         compression_controller: CompressionAlgorithmController,
         uncompressed_model_accuracy: float,
         verbose: bool,
@@ -139,4 +141,5 @@ class AdaptiveCompressionLevelTrainingRunnerCreator(TrainingRunnerCreator):
                 self.minimal_compression_rate,
                 self.maximal_compression_rate,
             )
-        raise RuntimeError("Got an unsupported value of nncf_backend")
+        msg = "Got an unsupported value of nncf_backend"
+        raise nncf.UnsupportedBackendError(msg)

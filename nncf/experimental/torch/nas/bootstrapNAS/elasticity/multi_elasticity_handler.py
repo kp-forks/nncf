@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -10,9 +10,8 @@
 # limitations under the License.
 import inspect
 from collections import OrderedDict
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from typing import OrderedDict as OrderedDictType
-from typing import Tuple
 
 from nncf.common.logging import nncf_logger
 from nncf.common.pruning.weights_flops_calculator import WeightsFlopsCalculator
@@ -26,14 +25,14 @@ from nncf.experimental.torch.nas.bootstrapNAS.elasticity.elastic_kernel import E
 from nncf.experimental.torch.nas.bootstrapNAS.elasticity.elastic_width import ElasticWidthHandler
 from nncf.experimental.torch.nas.bootstrapNAS.elasticity.elastic_width import ElasticWidthSearchSpace
 from nncf.experimental.torch.nas.bootstrapNAS.elasticity.elasticity_dim import ElasticityDim
-from nncf.torch.graph.operator_metatypes import PTDepthwiseConv1dSubtype
-from nncf.torch.graph.operator_metatypes import PTDepthwiseConv2dSubtype
-from nncf.torch.graph.operator_metatypes import PTDepthwiseConv3dSubtype
 from nncf.torch.graph.operator_metatypes import PTModuleConv1dMetatype
 from nncf.torch.graph.operator_metatypes import PTModuleConv2dMetatype
 from nncf.torch.graph.operator_metatypes import PTModuleConv3dMetatype
 from nncf.torch.graph.operator_metatypes import PTModuleConvTranspose2dMetatype
 from nncf.torch.graph.operator_metatypes import PTModuleConvTranspose3dMetatype
+from nncf.torch.graph.operator_metatypes import PTModuleDepthwiseConv1dSubtype
+from nncf.torch.graph.operator_metatypes import PTModuleDepthwiseConv2dSubtype
+from nncf.torch.graph.operator_metatypes import PTModuleDepthwiseConv3dSubtype
 from nncf.torch.graph.operator_metatypes import PTModuleLinearMetatype
 from nncf.torch.nncf_network import NNCFNetwork
 from nncf.torch.pruning.utils import collect_output_shapes
@@ -60,11 +59,11 @@ class MultiElasticityHandler(ElasticityHandler):
     def __init__(self, handlers: OrderedDictType[ElasticityDim, SingleElasticityHandler], target_model: NNCFNetwork):
         GENERAL_CONV_LAYER_METATYPES = [
             PTModuleConv1dMetatype,
-            PTDepthwiseConv1dSubtype,
+            PTModuleDepthwiseConv1dSubtype,
             PTModuleConv2dMetatype,
-            PTDepthwiseConv2dSubtype,
+            PTModuleDepthwiseConv2dSubtype,
             PTModuleConv3dMetatype,
-            PTDepthwiseConv3dSubtype,
+            PTModuleDepthwiseConv3dSubtype,
             PTModuleConvTranspose2dMetatype,
             PTModuleConvTranspose3dMetatype,
         ]

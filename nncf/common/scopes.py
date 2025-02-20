@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -10,8 +10,9 @@
 # limitations under the License.
 
 import re
-from typing import List, Optional, Union
+from typing import Iterable, List, Optional, Union
 
+import nncf
 from nncf.common.graph import NNCFGraph
 from nncf.common.graph import NNCFNode
 from nncf.common.graph import NNCFNodeName
@@ -21,23 +22,22 @@ from nncf.scopes import IgnoredScope
 from nncf.scopes import convert_ignored_scope_to_list
 
 
-def matches_any(tested_str: str, str_or_list_to_match_to: Union[List[str], str]) -> bool:
+def matches_any(tested_str: str, strs_to_match_to: Union[Iterable[str], str, None]) -> bool:
     """
-    Return True if tested_str matches at least one element in str_or_list_to_match_to.
+    Return True if tested_str matches at least one element in strs_to_match_to.
 
     :param tested_str: One of the supported entity types to be matched - currently possible to pass either
         NNCFNodeName (to refer to the original model operations) or QuantizerId (to refer to specific quantizers).
-    :param str_or_list_to_match_to: A list of strings specifying for the serializable_id. Entries of the strings
+    :param strs_to_match_to: A list or set of strings specifying for the serializable_id. Entries of the strings
         may be prefixed with `{re}` to enable regex matching.
 
     :return: A boolean value specifying whether a tested_str should matches at least one element
-        in str_or_list_to_match_to.
+        in strs_to_match_to.
     """
-
-    if str_or_list_to_match_to is None:
+    if strs_to_match_to is None:
         return False
 
-    str_list = [str_or_list_to_match_to] if isinstance(str_or_list_to_match_to, str) else str_or_list_to_match_to
+    str_list = [strs_to_match_to] if isinstance(strs_to_match_to, str) else strs_to_match_to
     for item in str_list:
         if "{re}" in item:
             regex = item.replace("{re}", "")
@@ -51,15 +51,15 @@ def matches_any(tested_str: str, str_or_list_to_match_to: Union[List[str], str])
 
 def should_consider_scope(
     serializable_id: Union[QuantizerId, NNCFNodeName],
-    ignored_scopes: List[str],
-    target_scopes: Optional[List[str]] = None,
+    ignored_scopes: Optional[Iterable[str]],
+    target_scopes: Optional[Iterable[str]] = None,
 ) -> bool:
     """
     Used when an entity arising during compression has to be compared to an allowlist or a denylist of strings.
 
     :param serializable_id: One of the supported entity types to be matched - currently possible to pass either
         NNCFNodeName (to refer to the original model operations) or QuantizerId (to refer to specific quantizers)
-    :param ignored_scopes: A list of strings specifying a denylist for the serializable_id. Entries of the list
+    :param ignored_scopes: A list or set of strings specifying a denylist for the serializable_id. Entries of the list
         may be prefixed with `{re}` to enable regex matching.
     :param target_scopes: A list of strings specifying an allowlist for the serializable_id. Entries of the list
         may be prefixed with `{re}` to enable regex matching.
@@ -72,7 +72,7 @@ def should_consider_scope(
     )
 
 
-def get_not_matched_scopes(scope: Union[List[str], str, IgnoredScope], nodes: List[NNCFNode]) -> List[str]:
+def get_not_matched_scopes(scope: Union[List[str], str, IgnoredScope, None], nodes: List[NNCFNode]) -> List[str]:
     """
     Return list of scope that do not match node list.
 
@@ -81,13 +81,15 @@ def get_not_matched_scopes(scope: Union[List[str], str, IgnoredScope], nodes: Li
 
     :return : List of not matched scopes.
     """
+    if scope is None:
+        return []
 
     if isinstance(scope, str):
         patterns = [scope]
     elif isinstance(scope, IgnoredScope):
         patterns = convert_ignored_scope_to_list(scope)
     else:
-        patterns = scope
+        patterns = list(scope)
 
     if not patterns:
         return []
@@ -137,5 +139,5 @@ def check_scopes_in_graph(
         )
 
         if validate_scopes:
-            raise RuntimeError(err_message)
+            raise nncf.ValidationError(err_message)
         nncf_logger.info(err_message)

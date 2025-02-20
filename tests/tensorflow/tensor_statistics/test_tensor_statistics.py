@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -20,13 +20,11 @@ from nncf.common.tensor_statistics.collectors import ReductionAxes
 from nncf.common.tensor_statistics.collectors import StatisticsNotCollectedError
 from nncf.common.tensor_statistics.collectors import TensorStatisticCollectorBase
 from nncf.common.tensor_statistics.statistics import TensorStatistic
-from nncf.tensorflow.tensor import TFNNCFTensor
 from nncf.tensorflow.tensor_statistics.collectors import TFMeanMinMaxStatisticCollector
 from nncf.tensorflow.tensor_statistics.collectors import TFMeanPercentileStatisticCollector
 from nncf.tensorflow.tensor_statistics.collectors import TFMedianMADStatisticCollector
 from nncf.tensorflow.tensor_statistics.collectors import TFMinMaxStatisticCollector
 from nncf.tensorflow.tensor_statistics.collectors import TFMixedMinMaxStatisticCollector
-from nncf.tensorflow.tensor_statistics.collectors import TFNNCFCollectorTensorProcessor
 from nncf.tensorflow.tensor_statistics.collectors import TFPercentileStatisticCollector
 from nncf.tensorflow.tensor_statistics.statistics import TFMedianMADTensorStatistic
 from nncf.tensorflow.tensor_statistics.statistics import TFMinMaxTensorStatistic
@@ -103,7 +101,7 @@ class TestCollectedStatistics:
         collector: Type[TensorStatisticCollectorBase],
         reduction_shapes_vs_ref_statistic: Dict[Tuple[ReductionAxes, ReductionAxes], TensorStatistic],
     ):
-        for reduction_shape in reduction_shapes_vs_ref_statistic.keys():
+        for reduction_shape in reduction_shapes_vs_ref_statistic:
             collector_obj = collector(use_abs_max=True, reduction_shape=reduction_shape)
             for input_ in TestCollectedStatistics.REF_INPUTS:
                 collector_obj.register_input(input_)
@@ -181,7 +179,7 @@ class TestCollectedStatistics:
         collector: Type[TensorStatisticCollectorBase],
         reduction_shapes_vs_ref_statistic: Dict[ReductionAxes, TensorStatistic],
     ):
-        for reduction_shape in reduction_shapes_vs_ref_statistic.keys():
+        for reduction_shape in reduction_shapes_vs_ref_statistic:
             collector_obj = collector(reduction_shape=reduction_shape)
             for input_ in TestCollectedStatistics.REF_INPUTS:
                 collector_obj.register_input(input_)
@@ -260,18 +258,3 @@ class TestCollectedStatistics:
         for input_ in TestCollectedStatistics.REF_INPUTS * 10:
             collector_for_num_samples_test.register_input(input_)
         assert collector_for_num_samples_test.collected_samples() == TestCollectedStatistics.REF_NUM_SAMPLES
-
-
-class TestCollectorTensorProcessor:
-    tensor_processor = TFNNCFCollectorTensorProcessor
-
-    def test_unstack(self):
-        # Unstack tensor with dimensions
-        tensor1 = tf.constant([1.0])
-        tensor_unstacked1 = TestCollectorTensorProcessor.tensor_processor.unstack(TFNNCFTensor(tensor1))
-
-        # Unstack dimensionless tensor
-        tensor2 = tf.constant(1.0)
-        tensor_unstacked2 = TestCollectorTensorProcessor.tensor_processor.unstack(TFNNCFTensor(tensor2))
-
-        assert tensor_unstacked1 == tensor_unstacked2 == [TFNNCFTensor(tf.constant(1.0))]

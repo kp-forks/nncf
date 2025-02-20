@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -11,13 +11,17 @@
 
 import threading
 import weakref
+from collections import OrderedDict
+from collections import defaultdict
 from collections import deque
 from contextlib import contextmanager
-from typing import Callable, Dict, List, Optional
+from typing import Callable, DefaultDict, Dict, List, Optional, Union
 
 import torch
 
 from nncf.common.graph.layer_attributes import BaseLayerAttributes
+from nncf.common.hook_handle import HookHandle
+from nncf.common.hook_handle import add_op_to_registry
 from nncf.common.utils.api_marker import api
 from nncf.common.utils.debug import is_debug
 from nncf.common.utils.patcher import PATCHER
@@ -30,7 +34,7 @@ from nncf.torch.dynamic_graph.operation_address import OperationAddress
 from nncf.torch.dynamic_graph.scope import Scope
 from nncf.torch.dynamic_graph.scope import ScopeElement
 from nncf.torch.dynamic_graph.trace_tensor import TensorMeta
-from nncf.torch.dynamic_graph.trace_tensor import TracedTensor
+from nncf.torch.dynamic_graph.trace_tensor import TracedTensorMixin
 
 
 class ThreadLocalGlobalContext(threading.local):
@@ -51,7 +55,7 @@ class PreHookId:
         return self.__dict__ == other.__dict__
 
     def __str__(self):
-        return str(self.op_address) + "|INPUT{}".format(self.input_port_id)
+        return str(self.op_address) + f"|INPUT{self.input_port_id}"
 
     def __hash__(self):
         return hash(str(self))
@@ -66,18 +70,22 @@ class TracingThreadLocals(threading.local):
         self.scopes = []
         self.module_call_stack = []
         self.in_operator = False
+        self.in_parameter_trace = False
         self.num_nested_hooks = 0
         self.base_module_replica = None
         self.operator_counters = {}
         self.node_call_tracker = {}
         self.traced_tensor_weakrefs = []
         self.nested_contexts_stack = []
+        self.processed_parameters = {}
 
 
 class CopySafeThreadingVars:
-    """A class holding variables that are related to threading and
+    """
+    A class holding variables that are related to threading and
     thus impossible to deepcopy. The deepcopy will simply return a
-    new object without copying, but won't fail."""
+    new object without copying, but won't fail.
+    """
 
     def __init__(self):
         self.thread_local = TracingThreadLocals()
@@ -91,9 +99,10 @@ class TracingContext:
     def __init__(self):
         self.graph = DynamicGraph()
 
-        self._post_hooks = {}
-        self._pre_hooks: Dict[PreHookId, List[Callable]] = {}
+        self._post_hooks: DefaultDict[OperationAddress, Dict[str, Callable]] = defaultdict(OrderedDict)
+        self._pre_hooks: DefaultDict[PreHookId, Dict[str, Callable]] = defaultdict(OrderedDict)
         self._num_nested_hooks = 0
+        self.reused_parameters = []
 
         self._threading = CopySafeThreadingVars()
 
@@ -131,7 +140,7 @@ class TracingContext:
         previous_context = self._threading.thread_local.nested_contexts_stack.pop(-1)
         for traced_tensor_weakref in self._threading.thread_local.traced_tensor_weakrefs:
             tt = traced_tensor_weakref()
-            if tt is None or not isinstance(tt, TracedTensor):
+            if tt is None or not isinstance(tt, TracedTensorMixin):
                 continue
             if previous_context is None:
                 tt.strip()
@@ -162,16 +171,35 @@ class TracingContext:
     def register_global_buffer(self, name: str, buffer):
         self.global_buffer_store[name] = buffer
 
-    def register_traced_tensor(self, tt: TracedTensor):
+    def register_traced_tensor(self, tt: torch.Tensor):
         """
         Registers a weak reference to a traced tensor in the context so that in case
         the block under context retains a reference to an intermediate tensor somewhere,
-        the context can mark this traced tensor reference as "expired" tracing-wise upon context
-        exit.
-        :param tt: A TracedTensor to be registered.
+        the context strips this traced tensor upon context exit.
+
+        :param tt: A tensor with TracedTensorMixin tracing capabilities to be registered.
         """
         wr = weakref.ref(tt)
         self._threading.thread_local.traced_tensor_weakrefs.append(wr)
+
+    def register_processed_parameter(self, param_name: str, tensor: torch.Tensor) -> None:
+        """
+        Registers the processed parameter in the context to avoid double calculation of hooks
+        for the same parameters.
+
+        :param param_name: The parameter name.
+        :param tensor: The processed parameter.
+        """
+        self._threading.thread_local.processed_parameters[param_name] = tensor
+
+    def get_processed_parameter(self, param_name: str) -> Union[torch.Tensor, None]:
+        """
+        Return the processed parameter by name.
+
+        :param param_name: The parameter name.
+        :return: The processed parameter by name if found, otherwise None.
+        """
+        return self._threading.thread_local.processed_parameters.get(param_name, None)
 
     def maybe_add_node(
         self,
@@ -214,7 +242,6 @@ class TracingContext:
         be loaded if the model had changed in the meantime in a way that does not impact the major function call
         order (e.g. if comments were added to the .py file with the model)
         """
-
         call_order = self.get_operator_call_count_in_scope(operator_name, self.scope)
 
         op_address = OperationAddress(operator_name, self.scope, call_order)
@@ -229,7 +256,7 @@ class TracingContext:
 
     @staticmethod
     def _get_operator_counter_key(operator_name: str, scope: Scope):
-        return "{}_{}".format(str(scope), operator_name)
+        return f"{str(scope)}_{operator_name}"
 
     def register_operator_call(self, operator_name: str, scope: Scope):
         key = self._get_operator_counter_key(operator_name, scope)
@@ -259,11 +286,9 @@ class TracingContext:
         self.relative_scopes_stack.pop()
         self.module_call_stack.pop()
 
-    def register_pre_hooks(self, fn_list: List[Callable], op_address: OperationAddress, input_port_id: int):
+    def register_pre_hook(self, fn: Callable, op_address: OperationAddress, input_port_id: int) -> HookHandle:
         pre_hook_id = PreHookId(op_address, input_port_id)
-        if pre_hook_id in self._pre_hooks:
-            raise KeyError("Pre hook for context {} is already registered".format(str(pre_hook_id)))
-        self._pre_hooks[pre_hook_id] = fn_list
+        return add_op_to_registry(self._pre_hooks[pre_hook_id], fn)
 
     def execute_pre_hooks(self, op_address: OperationAddress, op_inputs: OperatorInput) -> OperatorInput:
         in_op = getattr(self, "in_operator", False)
@@ -273,7 +298,7 @@ class TracingContext:
         pre_hook_ids_for_curr_op = [x for x in self._pre_hooks if x.op_address == op_address]
         pre_hook_ids_for_curr_op = sorted(pre_hook_ids_for_curr_op, key=lambda x: x.input_port_id)
         for pre_hook_id in pre_hook_ids_for_curr_op:
-            hook_list_for_current_input_port = self._pre_hooks[pre_hook_id]
+            hook_list_for_current_input_port = self._pre_hooks[pre_hook_id].values()
             input_arg_to_process = pre_hook_id.input_port_id
             for hook in hook_list_for_current_input_port:
                 op_inputs[input_arg_to_process] = hook(op_inputs[input_arg_to_process])
@@ -281,17 +306,15 @@ class TracingContext:
         self.in_operator = in_op
         return op_inputs
 
-    def register_post_hooks(self, fn_list: List[Callable], op_address: OperationAddress):
-        if op_address in self._post_hooks:
-            raise KeyError("Post hook for context {} is already registered".format(str(op_address)))
-        self._post_hooks[op_address] = fn_list
+    def register_post_hook(self, fn: Callable, op_address: OperationAddress) -> HookHandle:
+        return add_op_to_registry(self._post_hooks[op_address], fn)
 
     def execute_post_hooks(self, op_address: OperationAddress, outputs):
         in_op = getattr(self, "in_operator", False)
         self.in_operator = False
         self._threading.thread_local.num_nested_hooks += 1
         if op_address in self._post_hooks:
-            for hook in self._post_hooks[op_address]:
+            for hook in self._post_hooks[op_address].values():
                 outputs = hook(outputs)
         self._threading.thread_local.num_nested_hooks -= 1
         self.in_operator = in_op
@@ -341,6 +364,14 @@ class TracingContext:
     @in_operator.setter
     def in_operator(self, val):
         self._threading.thread_local.in_operator = val
+
+    @property
+    def in_parameter_trace(self):
+        return self._threading.thread_local.in_parameter_trace
+
+    @in_parameter_trace.setter
+    def in_parameter_trace(self, val):
+        self._threading.thread_local.in_parameter_trace = val
 
     @property
     def module_call_stack(self) -> List[torch.nn.Module]:
@@ -427,14 +458,13 @@ class TracingContext:
                 self.end_node_name_of_skipped_block.append(self.skipped_blocks[block_index].end_node_name)
 
     def set_elastic_blocks(self, blocks: List["BuildingBlock"] = None):  # noqa: F821
-        if blocks is not None:
-            if isinstance(blocks, list):
-                if len(blocks) == 0:
-                    self.skipped_blocks = []
-                elif isinstance(blocks[0], str):
-                    self.skipped_blocks = [blocks]
-                else:
-                    self.skipped_blocks = blocks
+        if blocks is not None and isinstance(blocks, list):
+            if len(blocks) == 0:
+                self.skipped_blocks = []
+            elif isinstance(blocks[0], str):
+                self.skipped_blocks = [blocks]
+            else:
+                self.skipped_blocks = blocks
 
 
 def set_current_context(c: TracingContext):

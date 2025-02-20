@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -12,7 +12,7 @@
 import functools
 import inspect
 from contextlib import contextmanager
-from typing import List
+from typing import Callable, List, Optional, Union
 
 import torch
 import torch.utils.cpp_extension
@@ -21,24 +21,31 @@ from torch.jit import is_tracing
 from torch.nn import DataParallel
 from torch.nn.parallel import DistributedDataParallel
 
+import nncf
 from nncf import nncf_logger
 from nncf.common.utils.api_marker import api
+from nncf.experimental.common.check_feature import is_experimental_torch_tracing_enabled
+from nncf.torch.dynamic_graph.patch_pytorch_state import PATCHING_STATE
 from nncf.torch.dynamic_graph.structs import NamespaceTarget
 from nncf.torch.dynamic_graph.structs import PatchedOperatorInfo
+from nncf.torch.dynamic_graph.trace_tensor import TracedParameter
 from nncf.torch.dynamic_graph.trace_tensor import TracedTensor
 from nncf.torch.dynamic_graph.wrappers import ignore_scope
 from nncf.torch.dynamic_graph.wrappers import wrap_module_call
 from nncf.torch.dynamic_graph.wrappers import wrap_operator
 
 
-def get_namespace_to_patch(namespace_target: NamespaceTarget) -> object:
+def get_namespaces_to_patch(namespace_target: NamespaceTarget) -> object:
     if namespace_target == NamespaceTarget.TORCH_NN_FUNCTIONAL:
         return torch.nn.functional
     if namespace_target == NamespaceTarget.TORCH_TENSOR:
         return TracedTensor
+    if namespace_target == NamespaceTarget.TORCH_NN_PARAMETER:
+        return TracedParameter
     if namespace_target == NamespaceTarget.TORCH:
         return torch
-    raise RuntimeError("{} namespace wasn't found in {}".format(namespace_target, NamespaceTarget))
+    msg = f"{namespace_target} namespace wasn't found in {NamespaceTarget}"
+    raise nncf.ValidationError(msg)
 
 
 def get_namespace_to_extract_functions_from(namespace_target: NamespaceTarget) -> object:
@@ -46,9 +53,12 @@ def get_namespace_to_extract_functions_from(namespace_target: NamespaceTarget) -
         return torch.nn.functional
     if namespace_target == NamespaceTarget.TORCH_TENSOR:
         return torch.Tensor
+    if namespace_target == NamespaceTarget.TORCH_NN_PARAMETER:
+        return torch.nn.Parameter
     if namespace_target == NamespaceTarget.TORCH:
         return torch._C._VariableFunctions
-    raise RuntimeError("{} namespace wasn't found in {}".format(namespace_target, NamespaceTarget))
+    msg = f"{namespace_target} namespace wasn't found in {NamespaceTarget}"
+    raise nncf.ValidationError(msg)
 
 
 class FunctionsToPatchWithoutTracing:
@@ -58,8 +68,6 @@ class FunctionsToPatchWithoutTracing:
         "as_tensor",
         "copysign",
         "copysign_",
-        "detach",
-        "detach_",
         "empty",
         "ones",
         "ones_like",
@@ -112,46 +120,62 @@ class FunctionsToPatchWithoutTracing:
         "storage",
         "storage_offset",
         "stride",
-        "to",
         "get_device",
+        "is_floating_point",
     ]
 
     FUNCTIONS_TO_PATCH_WITHOUT_TRACING = TENSOR_CREATING_FUNCTIONS + TENSOR_UTILITY_FUNCTIONS
 
 
 class MagicFunctionsToPatch:
+    TENSOR_MAGIC_FUNCTIONS = [
+        "__abs__",
+        "__add__",
+        "__and__",
+        "__div__",
+        "__eq__",
+        "__floordiv__",
+        "__ge__",
+        "__getitem__",
+        "__gt__",
+        "__iadd__",
+        "__iand__",
+        "__idiv__",
+        "__ifloordiv__",
+        "__imul__",
+        "__invert__",
+        "__ior__",
+        "__ipow__",
+        "__isub__",
+        "__itruediv__",
+        "__ixor__",
+        "__le__",
+        "__lt__",
+        "__matmul__",
+        "__mod__",
+        "__mul__",
+        "__ne__",
+        "__neg__",
+        "__or__",
+        "__pow__",
+        "__radd__",
+        "__rand__",
+        "__rdiv__",
+        "__rfloordiv__",
+        "__rmatmul__",
+        "__rmul__",
+        "__ror__",
+        "__rpow__",
+        "__rsub__",
+        "__rtruediv__",
+        "__rxor__",
+        "__sub__",
+        "__truediv__",
+        "__xor__",
+    ]
     MAGIC_FUNCTIONS_TO_PATCH = {
-        NamespaceTarget.TORCH_TENSOR: [
-            "__add__",
-            "__iadd__",
-            "__radd__",
-            "__sub__",
-            "__isub__",
-            "__rsub__",
-            "__mul__",
-            "__matmul__",
-            "__rmatmul__",
-            "__imul__",
-            "__rmul__",
-            "__div__",
-            "__idiv__",
-            "__truediv__",
-            "__floordiv__",
-            "__ifloordiv__",
-            "__rfloordiv__",
-            "__getitem__",
-            "__lt__",
-            "__le__",
-            "__gt__",
-            "__ge__",
-            "__mod__",
-            "__eq__",
-            "__ne__",
-            "__or__",
-            "__xor__",
-            "__and__",
-            "__pow__",
-        ]
+        NamespaceTarget.TORCH_TENSOR: TENSOR_MAGIC_FUNCTIONS,
+        NamespaceTarget.TORCH_NN_PARAMETER: TENSOR_MAGIC_FUNCTIONS + ["get_dtype"],
     }
 
 
@@ -223,6 +247,25 @@ def torch_jit_script_if_tracing(fn):
     return wrapper
 
 
+def get_torch_compile_wrapper():
+    """
+    Wrapper for torch.compile() that disables NNCF patching when called for vanilla PyTorch model and
+    raises an exception when called for an NNCF-optimized model.
+    """
+
+    @functools.wraps(_ORIG_TORCH_COMPILE)
+    def wrapper(model: Optional[Callable] = None, **kwargs):
+        from nncf.torch.nncf_network import NNCFNetwork
+
+        if isinstance(model, NNCFNetwork):
+            msg = "At the moment torch.compile() is not supported for models optimized by NNCF."
+            raise TypeError(msg)
+        with disable_patching():
+            return _ORIG_TORCH_COMPILE(model, **kwargs)
+
+    return wrapper
+
+
 class OriginalOpInfo:
     def __init__(self, name: str, namespace, op):
         self.name = name
@@ -232,10 +275,16 @@ class OriginalOpInfo:
 
 ORIGINAL_OPERATORS: List[OriginalOpInfo] = []
 ORIGINAL_CALL = torch.nn.Module.__call__
-_JIT_ALREADY_WRAPPED = False
-_OPERATORS_ALREADY_WRAPPED = False
 _ORIG_JIT_SCRIPT = None
 _ORIG_JIT_TRACE_MAKE_MODULE = None
+_ORIG_TORCH_COMPILE: Union[Callable, None] = None
+
+
+@functools.wraps(ORIGINAL_CALL)
+def unpatching_module_call(*args, **kwargs):
+    # Wrapper for module.__call__ that unpatches torch operators during model forward
+    with disable_patching():
+        return ORIGINAL_CALL(*args, **kwargs)
 
 
 def patch_torch_jit():
@@ -304,24 +353,32 @@ def get_all_functions_from_namespace(namespace: NamespaceTarget, do_filter: bool
 
 
 def patch_torch_operators():
+    if is_experimental_torch_tracing_enabled():
+        return
+
     # Only patch torch.jit.script during first patch_torch_operators call
-    global _JIT_ALREADY_WRAPPED
-    if not _JIT_ALREADY_WRAPPED:
+    if not PATCHING_STATE.jit_is_wrapped:
         patch_torch_jit()
-        _JIT_ALREADY_WRAPPED = True
+        PATCHING_STATE.jit_is_wrapped = True
+
+    # Unpatch torch operators during model compilation.
+    if not PATCHING_STATE.compile_is_wrapped:
+        global _ORIG_TORCH_COMPILE
+        _ORIG_TORCH_COMPILE = torch.compile
+        setattr(torch, "compile", get_torch_compile_wrapper())
+        PATCHING_STATE.compile_is_wrapped = True
 
     # Do not patch operators twice as well
-    global _OPERATORS_ALREADY_WRAPPED
-    if _OPERATORS_ALREADY_WRAPPED:
+    if PATCHING_STATE.operators_are_wrapped:
         return
-    _OPERATORS_ALREADY_WRAPPED = True
+    PATCHING_STATE.operators_are_wrapped = True
 
     global ORIGINAL_OPERATORS
     ORIGINAL_OPERATORS = []
 
     functions_to_patch = {}
     for namespace in NamespaceTarget:
-        if namespace == NamespaceTarget.EXTERNAL:
+        if namespace in [NamespaceTarget.ATEN, NamespaceTarget.EXTERNAL]:
             continue
         functions_to_patch[namespace] = get_all_functions_from_namespace(namespace)
 
@@ -355,7 +412,7 @@ def patch_torch_operators():
     for namespace, function_names in functions_to_patch.items():
         for function_name in function_names:
             op_info = PatchedOperatorInfo(function_name, namespace)
-            patched_namespace = get_namespace_to_patch(namespace)
+            patched_namespace = get_namespaces_to_patch(namespace)
             patch_namespace_opname(patched_namespace, op_info)
 
     # Patch operators without tracing so that
@@ -364,7 +421,7 @@ def patch_torch_operators():
     for namespace, function_names in functions_to_patch_without_tracing.items():
         for function_name in function_names:
             op_info = PatchedOperatorInfo(function_name, namespace, skip_trace=True)
-            patched_namespace = get_namespace_to_patch(namespace)
+            patched_namespace = get_namespaces_to_patch(namespace)
             patch_namespace_opname(patched_namespace, op_info)
 
     # Patch __repr__ twice in 'torch.Tensor' and 'TracedTensor'.
@@ -382,10 +439,9 @@ def patch_torch_operators():
 
 
 def unpatch_torch_operators():
-    global _OPERATORS_ALREADY_WRAPPED
-    if not _OPERATORS_ALREADY_WRAPPED:
+    if not PATCHING_STATE.operators_are_wrapped:
         return
-    _OPERATORS_ALREADY_WRAPPED = False
+    PATCHING_STATE.operators_are_wrapped = False
 
     for orig_op_info in ORIGINAL_OPERATORS:
         setattr(orig_op_info.namespace, orig_op_info.name, orig_op_info.op)
@@ -393,7 +449,7 @@ def unpatch_torch_operators():
 
 @contextmanager
 def disable_patching():
-    was_patched = _OPERATORS_ALREADY_WRAPPED
+    was_patched = PATCHING_STATE.operators_are_wrapped
     if was_patched:
         unpatch_torch_operators()
     try:

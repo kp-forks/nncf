@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -19,9 +19,10 @@ from nncf.openvino.graph.nncf_graph_builder import GraphConverter
 from tests.openvino.native.models import ConvModel
 from tests.openvino.native.models import DepthwiseConv4DModel
 from tests.openvino.native.models import LinearModel
+from tests.openvino.native.models import PreluModel
 from tests.openvino.native.models import WeightsModel
 
-TEST_MODELS = [LinearModel, ConvModel, DepthwiseConv4DModel]
+TEST_MODELS = [LinearModel, ConvModel, DepthwiseConv4DModel, PreluModel]
 REF_METATYPES_COUNTERS = [
     [
         ovm.OVParameterMetatype,
@@ -62,6 +63,7 @@ REF_METATYPES_COUNTERS = [
         ovm.OVReluMetatype,
         ovm.OVResultMetatype,
     ],
+    [ovm.OVPReluMetatype, ovm.OVResultMetatype, ovm.OVParameterMetatype, ovm.OVConstantMetatype],
 ]
 
 

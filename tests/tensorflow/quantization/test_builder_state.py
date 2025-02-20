@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -17,7 +17,7 @@ from examples.tensorflow.classification.main import load_checkpoint
 from examples.tensorflow.classification.main import load_compression_state
 from nncf.common.graph.transformations.commands import TargetPoint
 from nncf.common.graph.transformations.commands import TargetType
-from nncf.common.quantization.structs import QuantizationMode
+from nncf.common.quantization.structs import QuantizationScheme as QuantizationMode
 from nncf.tensorflow import create_compression_callbacks
 from nncf.tensorflow import register_default_init_args
 from nncf.tensorflow.callbacks.checkpoint_callback import CheckpointManagerCallback
@@ -33,7 +33,7 @@ from nncf.tensorflow.quantization.algorithm import TFQuantizationPoint
 from nncf.tensorflow.quantization.algorithm import TFQuantizationSetup
 from nncf.tensorflow.quantization.quantizers import TFQuantizerSpec
 from nncf.tensorflow.utils.state import TFCompressionState
-from tests.shared.serialization import check_serialization
+from tests.cross_fw.shared.serialization import check_serialization
 from tests.tensorflow.helpers import create_compressed_model_and_algo_for_test
 from tests.tensorflow.helpers import get_basic_conv_test_model
 from tests.tensorflow.quantization.test_algorithm_quantization import check_default_qspecs
