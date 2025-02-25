@@ -37,6 +37,8 @@
   - [6.3 Folder structure](#63-folder-structure)
   - [6.4 Test runtime considerations](#64-test-runtime-considerations)
   - [6.5 BKC management](#65-bkc-management)
+- [7 Security rules](#s7-security-rules)
+  - [7.1 Symlinks](#71-symlinks)
 
 </details>
 
@@ -59,7 +61,7 @@ the [PEP 8 -- Style Guide for Python Code](https://www.python.org/dev/peps/pep-0
 ## 2 Automating Code Formatting
 
 To maintain consistency and readability throughout the codebase, we use the [black](https://github.com/psf/black)
-and [isort](https://github.com/PyCQA/isort) tools for formatting. Before committing any changes,
+and [ruff](https://docs.astral.sh/ruff/) tools for formatting. Before committing any changes,
 it's important to run a pre-commit command to ensure that the code is properly formatted.
 You can use the following commands for this:
 
@@ -67,7 +69,7 @@ You can use the following commands for this:
 make pre-commit
 ```
 
-Also recommend configuring your IDE to run Black and isort tools automatically when saving files.
+Also recommend configuring your IDE to run Black and Ruff tools automatically when saving files.
 
 Automatic code formatting is mandatory for all Python files, but you can disable it for specific cases if required:
 
@@ -316,10 +318,10 @@ inline comments.
 
 #### 4.2.1 Modules
 
-Every file should contain a license boilerplate.
+Every file should contain a license boilerplate, where [YYYY] should be replaced to current year.
 
 ```python
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) [YYYY] Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -803,7 +805,7 @@ def log_current_time(log_stream: LogStream):
 
 ```python3
 class CheckpointConverter:
-    # ... 
+    # ...
     def convert(self, ckpt: CheckpointType) -> AnotherCheckpointType:
         pass
 ```
@@ -964,4 +966,47 @@ Good:
 
 ```bash
 torch==2.1.0
+```
+
+<a id="s7-security-rules"></a>
+<a id="7-security-rules"></a>
+<a id="security-rules"></a>
+
+## 7 Security rules
+
+<a id="s71-symlinks"></a>
+<a id="71-symlinks"></a>
+<a id="symlinks"></a>
+
+### 7.1 Symlinks
+
+The software attempts to access a file based on the filename, but it does not properly prevent that filename from
+identifying a hard or symlinks that resolves to an unintended recourses.
+
+Check for existence if file before opening or creating them:
+
+- If they already exists, make sure they are neither symbolic links nor hard links, unless it is an expected requirement of the application.
+- If a symlink is expected, check the target of the symlink to make sure it is pointing to an expected path before any other action.
+
+Bad:
+
+```python
+with open(file_path) as f:
+    loaded_json = json.load(f)
+```
+
+Good:
+
+```python
+from nncf.common.utils.os import safe_open
+...
+with safe_open(file_path) as f:
+    loaded_json = json.load(f)
+```
+
+```python
+from nncf.common.utils.os import fail_if_symlink
+...
+fail_if_symlink(file_path)
+function_to_save_or_read_file(file_path)
 ```

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -16,7 +16,7 @@ import torch
 from torch.autograd import Variable
 from torch.distributions.uniform import Uniform
 
-from nncf.common.quantization.structs import QuantizationMode
+from nncf.common.quantization.structs import QuantizationScheme as QuantizationMode
 from nncf.torch.quantization.quantize_functions import asymmetric_quantize
 from nncf.torch.quantization.quantize_functions import get_scale_zp_from_input_low_input_high
 from nncf.torch.quantization.quantize_functions import symmetric_quantize
@@ -393,15 +393,15 @@ class BaseParametrized:
 
     class TestAsymmetric:
         @classmethod
-        def generate_range(cls, input_size, scale_mode, is_weights, is_fp16, fixed=None):
+        def generate_range(cls, input_size, scale_mode, is_weights, is_fp16, levels, fixed=None):
             np_dtype = np.float16 if is_fp16 else np.float32
             return map(
                 lambda x: x.astype(np_dtype),
-                cls.generate_range_fp64(input_size, scale_mode, is_weights, fixed, is_fp16),
+                cls.generate_range_fp64(input_size, scale_mode, is_weights, fixed, is_fp16, levels),
             )
 
         @staticmethod
-        def generate_range_fp64(input_size, scale_mode, is_weights, fixed, is_fp16):
+        def generate_range_fp64(input_size, scale_mode, is_weights, fixed, is_fp16, levels):
             assert scale_mode in ["single_scale", "per_channel_scale"]
 
             if fixed is not None:
@@ -415,6 +415,19 @@ class BaseParametrized:
                     min_range = 1.0 if is_fp16 else 0.1
                     input_low = np.random.random_sample() * 3 - 1.5
                     input_range = min_range + np.random.random_sample() * 3
+                    if levels <= 16 and is_fp16:
+                        scale = (levels - 1) / input_range
+                        zp_fp = -input_low * scale
+                        # Checks zp_fp is not near the middle of two integer values
+                        # and fix it in case it is.
+                        if np.abs(np.abs(zp_fp - np.round(zp_fp)) - 0.5) < 0.1:
+                            # Make zp_fp += 0.2
+                            new_input_low = input_low + 0.2 / scale
+                            # Preserve sing of the input_low
+                            if np.sign(new_input_low) != np.sign(input_low):
+                                input_low -= 0.2 / scale
+                            else:
+                                input_low = new_input_low
                     return input_low, input_range
 
             if scale_mode == "single_scale":
@@ -465,7 +478,7 @@ class BaseParametrized:
                 np_dtype = np.float32
 
             level_low, level_high, levels = self.get_range_level(bits)
-            ref_input_low, ref_input_range = self.generate_range(input_size, scale_mode, is_weights, is_fp16)
+            ref_input_low, ref_input_range = self.generate_range(input_size, scale_mode, is_weights, is_fp16, levels)
             test_input_low, test_input_range = get_test_data(
                 [ref_input_low, ref_input_range], use_cuda, is_fp16=is_fp16
             )
@@ -529,7 +542,9 @@ class BaseParametrized:
                 fixed = {}
                 fixed["input_low"] = -(2 ** (bits - 1))
                 fixed["input_range"] = 2**bits - 1
-            ref_input_low, ref_input_range = self.generate_range(input_size, scale_mode, is_weights, is_fp16, fixed)
+            ref_input_low, ref_input_range = self.generate_range(
+                input_size, scale_mode, is_weights, is_fp16, levels, fixed
+            )
             test_input_low, test_input_range = get_test_data(
                 [ref_input_low, ref_input_range], use_cuda, is_backward=True, is_fp16=is_fp16
             )
@@ -599,12 +614,12 @@ class TestParametrizedLong(BaseParametrized):
     pass
 
 
-@pytest.mark.parametrize("device", ["cuda", "cpu"])
-def test_mapping_to_zero(quantization_mode, device):
+def test_mapping_to_zero(use_cuda, quantization_mode):
     torch.manual_seed(42)
 
-    if not torch.cuda.is_available() and device == "cuda":
+    if use_cuda and not torch.cuda.is_available():
         pytest.skip("Skipping CUDA test cases for CPU only setups")
+    device = "cuda" if use_cuda else "cpu"
     x_zero = torch.zeros([1]).to(torch.device(device))
     levels = 256
     eps = 1e-6

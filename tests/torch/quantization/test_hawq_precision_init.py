@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -26,6 +26,7 @@ from torch import nn
 from torchvision.models import resnet50
 from torchvision.transforms import transforms
 
+import nncf
 from examples.common.sample_config import SampleConfig
 from examples.torch.classification.main import create_cifar
 from examples.torch.object_detection.models.ssd_vgg import SSD_VGG
@@ -58,8 +59,8 @@ from nncf.torch.structures import QuantizationPrecisionInitArgs
 from nncf.torch.utils import get_all_modules_by_type
 from nncf.torch.utils import get_model_device
 from nncf.torch.utils import safe_thread_call
-from tests.shared.nx_graph import compare_nx_graph_with_reference
-from tests.shared.paths import TEST_ROOT
+from tests.cross_fw.shared.nx_graph import compare_nx_graph_with_reference
+from tests.cross_fw.shared.paths import TEST_ROOT
 from tests.torch.helpers import BasicConvTestModel
 from tests.torch.helpers import create_compressed_model_and_algo_for_test
 from tests.torch.helpers import create_conv
@@ -112,7 +113,7 @@ def get_bitwidth_per_scope(model, all_quantizations=None):
 
 def compare_with_ref_if_exists(actual_state, path_to_ref):
     if os.path.exists(path_to_ref):
-        with open(path_to_ref, "r", encoding="utf8") as f:
+        with open(path_to_ref, encoding="utf8") as f:
             assert json.load(f) == actual_state
     else:
         with open(path_to_ref, "w", encoding="utf8") as f:
@@ -145,8 +146,8 @@ class BaseConfigBuilder:
         self._options["device"] = config_type
         return self
 
-    def for_vpu(self):
-        return self._set_target_device(HWConfigType.VPU.value)
+    def for_npu(self):
+        return self._set_target_device(HWConfigType.NPU.value)
 
     def for_cpu(self):
         return self._set_target_device(HWConfigType.CPU.value)
@@ -206,8 +207,8 @@ class HAWQConfigBuilder(BaseConfigBuilder):
     def build(self):
         return self._config
 
-    def for_vpu(self):
-        super().for_vpu()
+    def for_npu(self):
+        super().for_npu()
         return self.strict_mode()
 
     def check_compression_ratio(self, compression_ratio=1.5):
@@ -280,8 +281,8 @@ def check_bitwidth_graph(algo_ctrl, model, path_to_dot, graph_dir, add_flops=Fal
 
 class HAWQTestStruct(NamedTuple):
     model_creator: Callable[[], nn.Module] = mobilenet_v2
-    config_builder: HAWQConfigBuilder = HAWQConfigBuilder().for_vpu()
-    filename_suffix: str = "hw_config_vpu"
+    config_builder: HAWQConfigBuilder = HAWQConfigBuilder().for_npu()
+    filename_suffix: str = "hw_config_npu"
     avg_traces_creator: Callable[[nn.Module, str], torch.Tensor] = get_avg_traces
 
     def __str__(self):
@@ -303,24 +304,24 @@ HAWQ_TEST_PARAMS = (
     HAWQTestStruct(config_builder=HAWQConfigBuilder().staged()),
     HAWQTestStruct(config_builder=HAWQConfigBuilder().for_trial()),
     HAWQTestStruct(config_builder=HAWQConfigBuilder().for_cpu()),
-    HAWQTestStruct(config_builder=HAWQConfigBuilder().for_vpu().liberal_mode().with_ratio(1.5)),
-    HAWQTestStruct(config_builder=HAWQConfigBuilder().with_ratio(1.02).for_vpu()),
+    HAWQTestStruct(config_builder=HAWQConfigBuilder().for_npu().liberal_mode().with_ratio(1.5)),
+    HAWQTestStruct(config_builder=HAWQConfigBuilder().with_ratio(1.02).for_npu()),
     HAWQTestStruct(
-        model_creator=squeezenet1_1, config_builder=HAWQConfigBuilder().with_sample_size([1, 3, 224, 224]).for_vpu()
+        model_creator=squeezenet1_1, config_builder=HAWQConfigBuilder().with_sample_size([1, 3, 224, 224]).for_npu()
     ),
-    HAWQTestStruct(model_creator=resnet50, config_builder=HAWQConfigBuilder().with_ratio(1.11).for_vpu()),
-    HAWQTestStruct(model_creator=resnet50, config_builder=HAWQConfigBuilder().for_vpu().liberal_mode().with_ratio(1.5)),
+    HAWQTestStruct(model_creator=resnet50, config_builder=HAWQConfigBuilder().with_ratio(1.11).for_npu()),
+    HAWQTestStruct(model_creator=resnet50, config_builder=HAWQConfigBuilder().for_npu().liberal_mode().with_ratio(1.5)),
     HAWQTestStruct(
         model_creator=inception_v3,
         avg_traces_creator=lambda x, y: get_avg_traces(x, y)[:95],
-        config_builder=HAWQConfigBuilder().with_sample_size([2, 3, 299, 299]).for_vpu().with_ratio(1),
+        config_builder=HAWQConfigBuilder().with_sample_size([2, 3, 299, 299]).for_npu().with_ratio(1),
     ),
     HAWQTestStruct(
         model_creator=inception_v3,
         avg_traces_creator=lambda x, y: get_avg_traces(x, y)[:94],
         config_builder=HAWQConfigBuilder()
         .with_sample_size([2, 3, 299, 299])
-        .for_vpu()
+        .for_npu()
         .liberal_mode()
         .with_ignored_scope(
             ["Inception3/BasicConv2d[Conv2d_2a_3x3]/NNCFConv2d[conv]/conv2d_0"], target_group=QuantizerGroup.WEIGHTS
@@ -332,7 +333,7 @@ HAWQ_TEST_PARAMS = (
         avg_traces_creator=lambda x, y: get_avg_traces(x, y)[:9],
         config_builder=HAWQConfigBuilder()
         .with_sample_size([2, 3, 299, 299])
-        .for_vpu()
+        .for_npu()
         .liberal_mode()
         .with_target_scope([r"{re}.*InceptionE\[Mixed_7c\].*"])
         .with_ratio(1.3)
@@ -342,15 +343,15 @@ HAWQ_TEST_PARAMS = (
     HAWQTestStruct(
         model_creator=inception_v3,
         avg_traces_creator=lambda x, y: get_avg_traces(x, y)[:95],
-        config_builder=HAWQConfigBuilder().with_sample_size([2, 3, 299, 299]).for_vpu().liberal_mode().with_ratio(1.5),
+        config_builder=HAWQConfigBuilder().with_sample_size([2, 3, 299, 299]).for_npu().liberal_mode().with_ratio(1.5),
     ),
     HAWQTestStruct(
         model_creator=ssd_vgg_512_test,
-        config_builder=HAWQConfigBuilder().with_sample_size([1, 3, 512, 512]).for_vpu().with_ratio(1.09),
+        config_builder=HAWQConfigBuilder().with_sample_size([1, 3, 512, 512]).for_npu().with_ratio(1.09),
     ),
     HAWQTestStruct(
         model_creator=ssd_vgg_512_test,
-        config_builder=HAWQConfigBuilder().with_sample_size([1, 3, 512, 512]).for_vpu().liberal_mode().with_ratio(1.5),
+        config_builder=HAWQConfigBuilder().with_sample_size([1, 3, 512, 512]).for_npu().liberal_mode().with_ratio(1.5),
     ),
 )
 
@@ -387,7 +388,7 @@ def test_hawq_precision_init(_seed, dataset_dir, tmp_path, mocker, params):
     mocked_trace.side_effect = side_effect_fn
     model, ctrl = create_compressed_model_and_algo_for_test(model, config)
 
-    path_to_dot = "{}_{}.dot".format(params.model_creator.__name__, config_builder.filename_suffix())
+    path_to_dot = f"{params.model_creator.__name__}_{config_builder.filename_suffix()}.dot"
     graph_dir = os.path.join("quantized", "hawq")
     check_bitwidth_graph(ctrl, model, path_to_dot, graph_dir, add_flops=config_builder.should_add_flops)
     if config_builder.compression_ratio:
@@ -430,8 +431,8 @@ def test_can_choose_pareto_optimal_sequence(ratios):
     assert compression_ratio_per_qconfig[qconfig_sequence_index] == expected_ratio
 
 
-def test_hawq_hw_vpu_config_e2e(_seed, dataset_dir, tmp_path):
-    config = HAWQConfigBuilder().for_vpu().liberal_mode().with_ratio(1.5).build()
+def test_hawq_hw_npu_config_e2e(_seed, dataset_dir, tmp_path):
+    config = HAWQConfigBuilder().for_npu().liberal_mode().with_ratio(1.5).build()
     model = MobileNetV2(num_classes=10)
     criterion = nn.CrossEntropyLoss()
     if not dataset_dir:
@@ -452,8 +453,8 @@ HAWQTestParams = namedtuple(
     (
         HAWQTestParams(200, 13, 100, 1.2741253547860323, 1.274125503581261),
         HAWQTestParams(2, 13, 100, 1.2646427814393832, 1.2646428162034615),
-        HAWQTestParams(2, 10, 10, 1.8305234709185931, 1.8305243724338203),
-        HAWQTestParams(2, 10, 5, 1.8305234709185931, 1.8305243724338203),
+        HAWQTestParams(2, 10, 10, 1.830527384351921, 1.8305243724338203),
+        HAWQTestParams(2, 10, 5, 1.830527384351921, 1.8305243724338203),
     ),
     ids=("until_threshold", "until_num_iter", "batch_eq_num_data", "batch_larger_num_data"),
 )
@@ -588,7 +589,7 @@ def disable_quantizer_gradients():
 
 
 def get_path_to_bitwidth_dump(tmp_path, rank):
-    out_file_path = tmp_path / "bitwidth_per_scope_gpu{}.pt".format(rank)
+    out_file_path = tmp_path / f"bitwidth_per_scope_gpu{rank}.pt"
     return out_file_path
 
 
@@ -613,6 +614,7 @@ def precision_init_dumping_worker(gpu, ngpus_per_node, config, tmp_path):
     torch.save(act_bitwidth_per_scope, str(out_file_path))
 
 
+@pytest.mark.cuda
 def test_can_broadcast_initialized_precisions_in_distributed_mode(tmp_path, runs_subprocess_in_precommit):
     if not torch.cuda.is_available():
         pytest.skip("Skipping CUDA test cases for CPU only setups")
@@ -627,7 +629,7 @@ def test_can_broadcast_initialized_precisions_in_distributed_mode(tmp_path, runs
     assert not compare_multi_gpu_dump(config, tmp_path, get_path_to_bitwidth_dump)
 
 
-@pytest.mark.parametrize(("method_name", "expected_behavior"), [("_calc_traces", pytest.raises(RuntimeError))])
+@pytest.mark.parametrize(("method_name", "expected_behavior"), [("_calc_traces", pytest.raises(nncf.InternalError))])
 def test_hawq_behaviour__if_method_returns_none(mocker, method_name, expected_behavior):
     config = HAWQConfigBuilder().with_sample_size([1, 1, 4, 4]).for_trial().build()
     config["compression"]["initializer"]["range"]["num_init_samples"] = 0

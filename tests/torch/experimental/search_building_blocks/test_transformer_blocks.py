@@ -1,4 +1,4 @@
-# Copyright (c) 2021-2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -33,7 +33,7 @@ from nncf.experimental.torch.search_building_blocks.search_blocks import Extende
 from nncf.experimental.torch.search_building_blocks.search_blocks import get_building_blocks
 from nncf.experimental.torch.search_building_blocks.search_blocks import get_indexes_of_overlapping_blocks_min
 from nncf.experimental.torch.search_building_blocks.search_blocks import get_indexes_of_overlapping_blocks_seq
-from tests.shared.paths import TEST_ROOT
+from tests.cross_fw.shared.paths import TEST_ROOT
 from tests.torch.helpers import create_compressed_model_and_algo_for_test
 from tests.torch.helpers import get_empty_config
 from tests.torch.nas.helpers import move_model_to_cuda_if_available
@@ -90,7 +90,7 @@ class SelfAttention(nn.Module):
 LIST_CASES = [
     TransformerSearchBBlockParamsCase(
         name="BERT",
-        input_info=[dict(sample_size=[1, 10], type="long")] * 3,
+        input_info=[dict(sample_size=[1, 10], type="long")],
         model_creator=partial(AutoModelForQuestionAnswering.from_config, BertConfig()),
     ),
     TransformerSearchBBlockParamsCase(
@@ -101,7 +101,10 @@ LIST_CASES = [
     TransformerSearchBBlockParamsCase(
         name="wave2vec 2.0",
         input_info=dict(sample_size=[1, 400]),
-        model_creator=partial(AutoModelForAudioClassification.from_config, Wav2Vec2Config()),
+        model_creator=partial(
+            AutoModelForAudioClassification.from_config,
+            Wav2Vec2Config(),
+        ),
     ),
     TransformerSearchBBlockParamsCase(
         name="SWIN MS",

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -10,10 +10,9 @@
 # limitations under the License.
 
 from abc import ABC
-from abc import abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, List, Tuple, Union
+from typing import Any, List, Optional, Tuple, Union
 
 
 class Dtype(Enum):
@@ -32,20 +31,22 @@ class BaseLayerAttributes(ABC):
 
 
 class MultipleInputLayerAttributes(BaseLayerAttributes):
-    def __init__(self, axis: int):
+    def __init__(self, axis: int, num_inputs: Optional[int] = None):
         """
 
         :param axis: the dimension over which the inputs are combined (e.g. concatenated).
+        :param num_inputs: Number of inputs.
         """
         self.axis = axis
+        self.num_inputs = num_inputs
 
 
 class MultipleOutputLayerAttributes(BaseLayerAttributes):
-    def __init__(self, chunks: Union[int, List], axis: int):
+    def __init__(self, chunks: Union[int, List[Any]], axis: int):
         """
 
-        :param chunks:  number of chunks (outputs)
-        :param axis: the dimension along which to make multiple outputs (e.g. split the tensor).
+        :param chunks: Number of chunks (outputs).
+        :param axis: The dimension along which to make multiple outputs (e.g. split the tensor).
         """
         self.chunks = chunks
         self.axis = axis
@@ -63,18 +64,6 @@ class WeightedLayerAttributes(BaseLayerAttributes):
         self.weight_requires_grad = weight_requires_grad
         self.dtype = dtype
         self.with_bias = with_bias
-
-    @abstractmethod
-    def get_weight_shape(self) -> List[int]:
-        pass
-
-    def get_num_filters(self) -> int:
-        weight_shape = self.get_weight_shape()
-        return weight_shape[self.get_target_dim_for_compression()]
-
-    @abstractmethod
-    def get_target_dim_for_compression(self) -> int:
-        pass
 
 
 class GenericWeightedLayerAttributes(WeightedLayerAttributes):
@@ -101,15 +90,15 @@ class GenericWeightedLayerAttributes(WeightedLayerAttributes):
         self.weight_shape = weight_shape
         self.filter_dimension_idx = filter_dimension_idx
 
-    def get_weight_shape(self) -> List[int]:
-        return self.weight_shape
-
-    def get_target_dim_for_compression(self) -> int:
-        return 0
-
 
 class LinearLayerAttributes(WeightedLayerAttributes):
-    def __init__(self, weight_requires_grad: bool, in_features: int, out_features: int, with_bias: bool = True):
+    def __init__(
+        self,
+        weight_requires_grad: bool,
+        in_features: int,
+        out_features: int,
+        with_bias: bool = True,
+    ):
         """
 
         :param weight_requires_grad: Is True if gradients need to be computed for the corresponding Tensor,
@@ -120,15 +109,6 @@ class LinearLayerAttributes(WeightedLayerAttributes):
         super().__init__(weight_requires_grad, with_bias=with_bias)
         self.in_features = in_features
         self.out_features = out_features
-
-    def get_weight_shape(self) -> List[int]:
-        return [self.out_features, self.in_features]
-
-    def get_bias_shape(self) -> int:
-        return self.out_features if self.with_bias is True else 0
-
-    def get_target_dim_for_compression(self) -> int:
-        return 0
 
 
 class ConvolutionLayerAttributes(WeightedLayerAttributes):
@@ -142,21 +122,23 @@ class ConvolutionLayerAttributes(WeightedLayerAttributes):
         dilations: Tuple[int, ...],
         groups: int,
         transpose: bool,
-        padding_values: Tuple[int, ...],
+        padding_values: Union[Tuple[int, ...], int],
         with_bias: bool = False,
+        output_padding_values: Optional[Union[Tuple[int, ...], int]] = None,
     ):
         """
 
         :param weight_requires_grad: Is True if gradients need to be computed for the corresponding Tensor,
         False otherwise.
-        :param in_channels: number of input channels in the layer's input.
-        :param out_channels: number of channels produced by the layer.
-        :param kernel_size: size of the convolving kernel.
-        :param stride: stride of the convolution.
-        :param groups: number of blocked connections from input channels to output channels.
+        :param in_channels: Number of input channels in the layer's input.
+        :param out_channels: Number of channels produced by the layer.
+        :param kernel_size: Size of the convolving kernel.
+        :param stride: Stride of the convolution.
+        :param groups: Number of blocked connections from input channels to output channels.
         :param transpose: If set to `True`, the layer is an ordinary convolution, otherwise - transpose one.
-        :param padding_values: defines the amount of padding applied to the layer's input.
+        :param padding_values: Defines the amount of padding applied to the layer's input.
         :param with_bias: Operation include bias.
+        :param output_padding_values: Defines the amount of output padding applied to the layer's output, for transpose.
         """
         super().__init__(weight_requires_grad=weight_requires_grad, with_bias=with_bias)
         self.in_channels = in_channels
@@ -167,17 +149,7 @@ class ConvolutionLayerAttributes(WeightedLayerAttributes):
         self.groups = groups
         self.transpose = transpose
         self.padding_values = padding_values
-
-    def get_weight_shape(self) -> List[int]:
-        if not self.transpose:
-            return [self.out_channels, self.in_channels // self.groups, *self.kernel_size]
-        return [self.in_channels, self.out_channels // self.groups, *self.kernel_size]
-
-    def get_target_dim_for_compression(self) -> int:
-        # Always quantize per each "out" channel
-        if self.transpose:
-            return 1
-        return 0
+        self.output_padding_values = output_padding_values
 
 
 class GroupNormLayerAttributes(WeightedLayerAttributes):
@@ -192,12 +164,6 @@ class GroupNormLayerAttributes(WeightedLayerAttributes):
         super().__init__(weight_requires_grad)
         self.num_channels = num_channels
         self.num_groups = num_groups
-
-    def get_weight_shape(self) -> List[int]:
-        return [self.num_channels]
-
-    def get_target_dim_for_compression(self) -> int:
-        return 0
 
 
 @dataclass
@@ -260,3 +226,14 @@ class ConvertDtypeLayerAttributes(BaseLayerAttributes):
 
     src_dtype: Any
     dst_dtype: Any
+
+
+@dataclass
+class ConstantLayerAttributes(BaseLayerAttributes):
+    """
+    :param name: Constant name.
+    :param shape: Constant shape.
+    """
+
+    name: str
+    shape: List[int]

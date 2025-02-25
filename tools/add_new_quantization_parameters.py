@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -63,10 +63,7 @@ def main(argv):
     files_to_copy = []
     for pair in pth_files:
         src_file, dst_file = pair
-        if "binarization" in src_file:
-            files_to_copy.append(pair)
-            continue
-        sd = pth = torch.load(src_file)
+        sd = pth = torch.load(src_file, weights_only=False)
         if "state_dict" in pth:
             sd = pth["state_dict"]
 
@@ -74,7 +71,7 @@ def main(argv):
         new_keys = {}
         for new_parameter in param_list:
             old_keys = list(sd.keys())
-            for k in sd.keys():
+            for k in sd:
                 for h in hooks:
                     new_key = k.replace(h, new_parameter.name)
                     if ("." + h in k) and ("." + new_parameter.name not in k) and (new_key not in old_keys):
@@ -91,7 +88,7 @@ def main(argv):
             files_to_copy.append(pair)
 
     for src_file, dst_file in files_to_copy:
-        print("\nCopying {}".format(dst_file))
+        print(f"\nCopying {dst_file}")
         copyfile(src_file, dst_file)
 
 

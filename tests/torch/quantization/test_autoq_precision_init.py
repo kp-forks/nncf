@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -45,7 +45,7 @@ class AutoQConfigBuilder(BaseConfigBuilder):
             self._config = self.create_autoq_test_config(
                 batch_size, image_size, num_channels, num_init_samples=num_init_samples
             )
-        self.for_vpu()
+        self.for_npu()
 
     def eval_subset_ratio(self, eval_subset_ratio):
         self._options["eval_subset_ratio"] = str(eval_subset_ratio)
@@ -90,8 +90,8 @@ class AutoQConfigBuilder(BaseConfigBuilder):
 
 class AutoQTestStruct(NamedTuple):
     model_creator: Callable[[], nn.Module] = mobilenet_v2
-    config_builder: AutoQConfigBuilder = AutoQConfigBuilder().for_vpu()
-    filename_suffix: str = "hw_config_vpu"
+    config_builder: AutoQConfigBuilder = AutoQConfigBuilder().for_npu()
+    filename_suffix: str = "hw_config_npu"
 
     def __str__(self):
         return "_".join([self.model_creator.__name__, str(self.config_builder)])
@@ -137,6 +137,7 @@ AUTOQ_TEST_PARAMS = (
 )
 
 
+@pytest.mark.cuda
 @pytest.mark.parametrize("params", AUTOQ_TEST_PARAMS, ids=[str(p) for p in AUTOQ_TEST_PARAMS])
 def test_autoq_precision_init(_seed, dataset_dir, tmp_path, mocker, params):
     config = params.config_builder.build()
@@ -178,11 +179,12 @@ def test_autoq_precision_init(_seed, dataset_dir, tmp_path, mocker, params):
     final_num_of_adjust_pad_ops = len(get_all_modules_by_type(model, "UpdatePaddingValue"))
     assert adjust_pad_creation_spy.call_count == final_num_of_adjust_pad_ops
 
-    path_to_dot = "{}_{}.dot".format(params.model_creator.__name__, params.config_builder.filename_suffix())
+    path_to_dot = f"{params.model_creator.__name__}_{params.config_builder.filename_suffix()}.dot"
     graph_dir = os.path.join("quantized", "autoq")
     check_bitwidth_graph(algo_ctrl, model, path_to_dot, graph_dir)
 
 
+@pytest.mark.cuda
 def test_can_broadcast_initialized_precisions_in_distributed_mode(tmp_path, runs_subprocess_in_precommit):
     if not torch.cuda.is_available():
         pytest.skip("Skipping CUDA test cases for CPU only setups")

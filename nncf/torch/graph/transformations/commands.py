@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -9,7 +9,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Callable, Dict
+from enum import Enum
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 
@@ -20,6 +21,8 @@ from nncf.common.graph.transformations.commands import TargetType
 from nncf.common.graph.transformations.commands import TransformationCommand
 from nncf.common.graph.transformations.commands import TransformationPriority
 from nncf.common.graph.transformations.commands import TransformationType
+
+DEFAULT_HOOKS_GROUP_NAME = "default_hooks_group"
 
 
 class PTTargetPointStateNames:
@@ -40,12 +43,13 @@ class PTTargetPoint(TargetPoint):
 
     _state_names = PTTargetPointStateNames
 
-    def __init__(self, target_type: TargetType, target_node_name: NNCFNodeName, *, input_port_id: int = None):
+    def __init__(self, target_type: TargetType, target_node_name: NNCFNodeName, *, input_port_id: Optional[int] = None):
         super().__init__(target_type)
         self.target_node_name = target_node_name
         self.target_type = target_type
         if self.target_type not in self._OPERATION_TYPES + self._HOOK_TYPES + self._LAYER_TYPE:
-            raise NotImplementedError("Unsupported target type: {}".format(target_type))
+            msg = f"Unsupported target type: {target_type}"
+            raise NotImplementedError(msg)
 
         self.input_port_id = input_port_id
 
@@ -54,16 +58,17 @@ class PTTargetPoint(TargetPoint):
             isinstance(other, PTTargetPoint)
             and self.target_type == other.target_type
             and self.target_node_name == other.target_node_name
+            and self.input_port_id == other.input_port_id
         )
 
     def __str__(self):
         prefix = str(self.target_type)
         retval = prefix
         if self.target_type in self._OPERATION_TYPES + self._LAYER_TYPE:
-            retval += " {}".format(self.target_node_name)
+            retval += f" {self.target_node_name}"
         elif self.target_type in self._HOOK_TYPES:
             if self.input_port_id is not None:
-                retval += " {}".format(self.input_port_id)
+                retval += f" {self.input_port_id}"
             retval += " " + str(self.target_node_name)
         return retval
 
@@ -125,9 +130,6 @@ class PTTransformationCommand(TransformationCommand):
         """
         return False
 
-    def union(self, other: "PTTransformationCommand") -> "PTTransformationCommand":
-        raise NotImplementedError()
-
 
 class PTInsertionCommand(PTTransformationCommand):
     """
@@ -138,60 +140,58 @@ class PTInsertionCommand(PTTransformationCommand):
         self,
         point: PTTargetPoint,
         fn: Callable,
-        priority: TransformationPriority = TransformationPriority.DEFAULT_PRIORITY,
+        priority: Union[TransformationPriority, int] = TransformationPriority.DEFAULT_PRIORITY,
+        hooks_group_name: str = DEFAULT_HOOKS_GROUP_NAME,
     ):
         super().__init__(TransformationType.INSERT, point)
         self.fn: Callable = fn
         self.priority: TransformationPriority = priority
-
-    def union(self, other: "PTTransformationCommand") -> "PTTransformationCommand":
-        # TODO: keep all TransformationCommands atomic, refactor TransformationLayout instead
-        raise NotImplementedError()
+        self.hooks_group_name = hooks_group_name
 
     def requires_graph_rebuild(self):
-        """
-        Return boolean flag to rebuild graph of model.
-
-        :return: Boolean flag.
-        """
         # Rebuild graph when adding quantization nodes.
         return self.priority == TransformationPriority.QUANTIZATION_PRIORITY
 
 
-class PTQuantizerInsertionCommand(PTTransformationCommand):
-    """
-    Insertion quantizer operation to the models.
-    """
+class ExtraCompressionModuleType(Enum):
+    EXTERNAL_QUANTIZER = 0
+    EXTERNAL_OP = 1
 
+
+class PTSharedFnInsertionCommand(PTTransformationCommand):
     def __init__(
         self,
-        point: PTTargetPoint,
-        quantizer: "BaseQuantizer",  # noqa: F821
+        target_points: List[PTTargetPoint],
+        fn: Callable,
+        op_unique_name: str,
+        compression_module_type: ExtraCompressionModuleType = ExtraCompressionModuleType.EXTERNAL_OP,
+        priority: Union[TransformationPriority, int] = TransformationPriority.DEFAULT_PRIORITY,
+        hooks_group_name: str = DEFAULT_HOOKS_GROUP_NAME,
     ):
-        super().__init__(TransformationType.INSERT, point)
-        self.quantizer = quantizer
-
-    def union(self, other: "PTTransformationCommand") -> "PTTransformationCommand":
-        raise NotImplementedError()
+        super().__init__(TransformationType.INSERT, None)
+        self.target_points = target_points
+        self.fn = fn
+        self.op_name = op_unique_name
+        self.compression_module_type = compression_module_type
+        self.priority = priority
+        self.hooks_group_name = hooks_group_name
 
     def requires_graph_rebuild(self):
         return True
 
 
-class PTModelExtractionWithFusedBiasCommand(PTCommand):
+class PTModelExtractionCommand(PTCommand):
     """
-    Extracts sequence by name with node that contain fused bias.
+    Extracts submodel based on the sub-model input and output names
     """
 
-    def __init__(self, node_name: str):
+    def __init__(self, input_node_names: List[str], output_node_names: List[str]):
         """
         :param node_name: Node name that will be extracted.
         """
         super().__init__(TransformationType.EXTRACT)
-        self.node_name = node_name
-
-    def union(self, other: "Command") -> "Command":
-        raise NotImplementedError()
+        self.input_node_names = input_node_names
+        self.output_node_names = output_node_names
 
 
 class PTBiasCorrectionCommand(PTTransformationCommand):
@@ -207,5 +207,16 @@ class PTBiasCorrectionCommand(PTTransformationCommand):
         super().__init__(TransformationType.CHANGE, target_point)
         self.bias_value = bias_value
 
-    def union(self, other: "PTTransformationCommand") -> "PTTransformationCommand":
-        raise NotImplementedError()
+
+class PTWeightUpdateCommand(PTTransformationCommand):
+    """
+    Corrects weight value in the model based on the input value.
+    """
+
+    def __init__(self, target_point: PTTargetPoint, weight_value: torch.Tensor):
+        """
+        :param target_point: The TargetPoint instance for the correction that contains layer's information.
+        :param weight_value: The new weight value that will be used instead of the original weight value.
+        """
+        super().__init__(TransformationType.CHANGE, target_point)
+        self.weight_value = weight_value

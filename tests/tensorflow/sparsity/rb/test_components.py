@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -9,6 +9,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import contextlib
 import os
 from collections import defaultdict
 from itertools import combinations
@@ -72,18 +73,26 @@ def calc_rb_mask_decorator(fn):
     return wrapper
 
 
-@pytest.mark.parametrize("quantization", [False, True], ids=["without_quantization", "with_quantization"])
-@patch("nncf.tensorflow.sparsity.rb.operation.calc_rb_binary_mask", new=calc_rb_mask_decorator(calc_rb_binary_mask))
-def test_distributed_masks_are_equal(quantization):
-    # Clean output file
-    try:
-        os.remove(MASKS_SEEDS_PATH)
-    except OSError:
-        pass
-    # Fill file with seeds
+@pytest.fixture(scope="module")
+def mirrored_strategy():
+    gpus = tf.config.list_physical_devices("GPU")
+    if len(gpus) == 0:
+        return tf.distribute.get_strategy()
     num_of_replicas = 3
     strategy = tf.distribute.MirroredStrategy([f"GPU:{i}" for i in range(num_of_replicas)])
-    with strategy.scope():
+    return strategy
+
+
+@pytest.mark.parametrize("quantization", [False, True], ids=["without_quantization", "with_quantization"])
+@patch("nncf.tensorflow.sparsity.rb.operation.calc_rb_binary_mask", new=calc_rb_mask_decorator(calc_rb_binary_mask))
+def test_distributed_masks_are_equal(quantization, mirrored_strategy):
+    # Clean output file
+    with contextlib.suppress(OSError):
+        os.remove(MASKS_SEEDS_PATH)
+
+    # Fill file with seeds
+    num_of_replicas = 3
+    with mirrored_strategy.scope():
         config = NNCFConfig.from_json(CONF)
         if quantization:
             config.update({"compression": [config["compression"], {"algorithm": "quantization"}]})
@@ -110,7 +119,7 @@ def test_distributed_masks_are_equal(quantization):
 
         model.fit(dataset, epochs=1, validation_split=0, callbacks=[compression_callbacks])
     # Check seeds in file
-    with open(MASKS_SEEDS_PATH, "r", encoding="utf8") as f:
+    with open(MASKS_SEEDS_PATH, encoding="utf8") as f:
         seeds = f.readlines()
     seeds_per_replica = defaultdict(list)
     for row in seeds:

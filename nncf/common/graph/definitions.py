@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -11,8 +11,10 @@
 
 MODEL_INPUT_OP_NAME = "nncf_model_input"
 MODEL_OUTPUT_OP_NAME = "nncf_model_output"
+MODEL_CONST_OP_NAME = "nncf_model_const"
 
 
 class NNCFGraphNodeType:
     INPUT_NODE = MODEL_INPUT_OP_NAME
     OUTPUT_NODE = MODEL_OUTPUT_OP_NAME
+    CONST_NODE = MODEL_CONST_OP_NAME

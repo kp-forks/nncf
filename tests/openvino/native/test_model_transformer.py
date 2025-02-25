@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -10,52 +10,65 @@
 # limitations under the License.
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, List, Tuple
 
 import numpy as np
 import openvino.runtime as ov
 import pytest
-from openvino.runtime import opset9 as opset
+from openvino.runtime import opset13 as opset
 
+import nncf
 from nncf.common.graph.transformations.commands import TargetType
 from nncf.common.graph.transformations.layout import TransformationLayout
 from nncf.openvino.graph.model_transformer import OVModelTransformer
+from nncf.openvino.graph.node_utils import get_const_value
 from nncf.openvino.graph.node_utils import get_inplace_batch_mean_op
 from nncf.openvino.graph.node_utils import get_inplace_max_op
+from nncf.openvino.graph.node_utils import get_inplace_max_var_op
+from nncf.openvino.graph.node_utils import get_inplace_mean_max_op
 from nncf.openvino.graph.node_utils import get_inplace_mean_op
 from nncf.openvino.graph.node_utils import get_inplace_mean_per_ch
+from nncf.openvino.graph.node_utils import get_inplace_mean_var_op
 from nncf.openvino.graph.node_utils import get_inplace_min_op
-from nncf.openvino.graph.node_utils import get_ov_model_reduce_node_name
+from nncf.openvino.graph.node_utils import get_inplace_shape_op
 from nncf.openvino.graph.node_utils import get_result_node_name
 from nncf.openvino.graph.transformations.commands import OVBiasCorrectionCommand
 from nncf.openvino.graph.transformations.commands import OVBiasInsertionCommand
+from nncf.openvino.graph.transformations.commands import OVConvertInsertionCommand
 from nncf.openvino.graph.transformations.commands import OVFQNodeRemovingCommand
 from nncf.openvino.graph.transformations.commands import OVInplaceFnInsertionCommand
 from nncf.openvino.graph.transformations.commands import OVModelExtractionCommand
 from nncf.openvino.graph.transformations.commands import OVMultiplyInsertionCommand
 from nncf.openvino.graph.transformations.commands import OVOutputInsertionCommand
 from nncf.openvino.graph.transformations.commands import OVQuantizerInsertionCommand
+from nncf.openvino.graph.transformations.commands import OVStateLessModelExtractionCommand
 from nncf.openvino.graph.transformations.commands import OVTargetPoint
+from nncf.quantization.advanced_parameters import FP8Type
+from nncf.quantization.fake_quantize import FakeConvertParameters
 from nncf.quantization.fake_quantize import FakeQuantizeParameters
-from tests.openvino.conftest import OPENVINO_NATIVE_TEST_ROOT
+from nncf.tensor import Tensor
 from tests.openvino.native.common import compare_nncf_graphs
-from tests.openvino.native.common import get_openvino_version
+from tests.openvino.native.common import get_actual_reference_for_current_openvino
 from tests.openvino.native.models import ConvModel
 from tests.openvino.native.models import ConvNotBiasModel
 from tests.openvino.native.models import FPModel
 from tests.openvino.native.models import LinearModel
 from tests.openvino.native.models import QuantizedModel
 from tests.openvino.native.models import SimpleSplitModel
+from tests.openvino.native.models import StatefulModel
 from tests.openvino.native.models import WeightsModel
 from tests.openvino.native.models import ZeroRankEltwiseModel
 
-OV_VERSION = get_openvino_version()
-REFERENCE_GRAPHS_DIR = OPENVINO_NATIVE_TEST_ROOT / "data" / OV_VERSION / "reference_graphs" / "original_nncf_graph"
+REFERENCE_GRAPHS_DIR = Path("reference_graphs") / "original_nncf_graph"
 
 TARGET_INSERT_LAYERS = [["Add"], ["MatMul"], ["Add", "MatMul"]]
 TARGET_PRE_LAYER_FQS = [["Add/fq_input_0"], ["MatMul/fq_input_0"], ["Add/fq_input_0", "MatMul/fq_input_0"]]
+TARGET_PRE_LAYER_FCS = [["Add/fc_input_0"], ["MatMul/fc_input_0"], ["Add/fc_input_0", "MatMul/fc_input_0"]]
 TARGET_POST_LAYER_FQS = [["Add/fq_output_0"], ["MatMul/fq_output_0"], ["Add/fq_output_0", "MatMul/fq_output_0"]]
+TARGET_POST_LAYER_FCS = [["Add/fc_output_0"], ["MatMul/fc_output_0"], ["Add/fc_output_0", "MatMul/fc_output_0"]]
 TARGET_WEIGHTS_FQS = [["Add/fq_weights_1"], ["MatMul/fq_weights_1"], ["Add/fq_weights_1", "MatMul/fq_weights_1"]]
+TARGET_WEIGHTS_FCS = [["Add/fc_weights_1"], ["MatMul/fc_weights_1"], ["Add/fc_weights_1", "MatMul/fc_weights_1"]]
 
 
 def create_transformed_model(model, target_layers, target_type, command_type, port_id=0, command_kwargs=None):
@@ -73,24 +86,45 @@ def create_transformed_model(model, target_layers, target_type, command_type, po
     return transformed_model
 
 
-def get_extra_outputs(original_model, transformed_model):
-    extra_outputs = set()
+def get_extra_outputs(original_model, transformed_model, as_nodes=False):
+    extra_outputs = {}
     for out in transformed_model.get_results():
-        extra_outputs.add(out.get_friendly_name())
+        extra_outputs[out.get_friendly_name()] = out
 
     for out in original_model.get_results():
-        extra_outputs.remove(out.get_friendly_name())
+        extra_outputs.pop(out.get_friendly_name())
 
-    return extra_outputs
+    names_set = set(extra_outputs.keys())
+    nodes_set = set(extra_outputs.values())
+
+    return nodes_set if as_nodes else names_set
 
 
-def get_fq_nodes(model):
+def get_nodes_by_type(model: ov.Model, type_name: str) -> List[ov.Node]:
     fq_nodes = []
     for op in model.get_ops():
-        if op.get_type_name() == "FakeQuantize":
-            fq_nodes.append(op.get_friendly_name())
+        if op.get_type_name() == type_name:
+            fq_nodes.append(op)
 
     return fq_nodes
+
+
+def create_fake_quantize_params() -> FakeQuantizeParameters:
+    min_values = Tensor(np.zeros((1, 1, 1, 1)).astype(np.float32))
+    max_values = Tensor(np.ones((1, 1, 1, 1)).astype(np.float32))
+    return FakeQuantizeParameters(min_values, max_values, min_values, max_values, levels=256)
+
+
+def create_fake_convert_params(destination_type: FP8Type) -> FakeConvertParameters:
+    scale = Tensor(np.ones(1).astype(np.float32))
+    shift = Tensor(np.zeros(1).astype(np.float32))
+    return FakeConvertParameters(scale, shift, destination_type)
+
+
+def verify_inputs_equality(node: ov.Node) -> None:
+    act_type = node.input(0).get_source_output().get_element_type()
+    for node_input in node.inputs():
+        assert node_input.get_source_output().get_element_type() == act_type
 
 
 @dataclass
@@ -103,7 +137,8 @@ class InplaceOpTestCase:
     dims: str = "DEFAULT"
 
     def __str__(self) -> str:
-        return str(self.__dict__.values())
+        s = f"{self.name}-{self.reduce_shape}-{self.op_builder.__name__}-{self.ref_types}-{self.ref_values}-{self.dims}"
+        return s.replace(" ", "")
 
 
 LINEAR_MODEL_SHAPES = {
@@ -119,19 +154,80 @@ INPLACE_OPS_TEST_CASES = [
     # Forwarded reduce shape
     InplaceOpTestCase("min", (1, 2), get_inplace_min_op, ["ReduceMin"], [(1, 2)]),
     InplaceOpTestCase("mean", (1, 2), get_inplace_mean_op, ["ReduceMean"], [(1, 2)]),
-    InplaceOpTestCase("max", (1, 2), lambda o, r: get_inplace_max_op(o, r, False), ["ReduceMax"], [(1, 2)]),
+    InplaceOpTestCase("max", (1, 2), lambda r: get_inplace_max_op(r, False), ["ReduceMax"], [(1, 2)]),
+    InplaceOpTestCase("abs_max", (1, 2), lambda r: get_inplace_max_op(r, True), ["Abs", "ReduceMax"], [None, (1, 2)]),
     InplaceOpTestCase(
-        "abs_max", (1, 2), lambda o, r: get_inplace_max_op(o, r, True), ["Abs", "ReduceMax"], [None, (1, 2)]
+        "mean_var",
+        (1, 2),
+        lambda r: get_inplace_mean_var_op(r),
+        ["ReduceMean", "SquaredDifference", "ReduceMean", "ReduceMean"],
+        [(1, 2), None, (1, 2), (0, 1, 2, 3)],
+    ),
+    InplaceOpTestCase(
+        "max_var",
+        (1, 2),
+        lambda r: get_inplace_max_var_op(r),
+        ["ReduceMean", "SquaredDifference", "ReduceMean", "ReduceMax"],
+        [(1, 2), None, (1, 2), (0, 1, 2, 3)],
+    ),
+    InplaceOpTestCase(
+        "mean_max",
+        (1, 2),
+        lambda r: get_inplace_mean_max_op(r, False),
+        ["ReduceMax", "ReduceMean"],
+        [(1, 2), (0, 1, 2, 3)],
+    ),
+    InplaceOpTestCase(
+        "mean_max",
+        (1, 2),
+        lambda r: get_inplace_mean_max_op(r, True),
+        ["Abs", "ReduceMax", "ReduceMean"],
+        [None, (1, 2), (0, 1, 2, 3)],
     ),
     # Calculated reduce shape
     InplaceOpTestCase("min", None, get_inplace_min_op, ["ReduceMin"], [(0, 1, 2, 3)]),
     InplaceOpTestCase("mean", None, get_inplace_mean_op, ["ReduceMean"], [(0, 1, 2, 3)]),
-    InplaceOpTestCase("max", None, lambda o, r: get_inplace_max_op(o, r, False), ["ReduceMax"], [(0, 1, 2, 3)]),
+    InplaceOpTestCase("max", None, lambda r: get_inplace_max_op(r, False), ["ReduceMax"], [(0, 1, 2, 3)]),
     InplaceOpTestCase(
-        "abs_max", None, lambda o, r: get_inplace_max_op(o, r, True), ["Abs", "ReduceMax"], [None, (0, 1, 2, 3)]
+        "abs_max", None, lambda r: get_inplace_max_op(r, True), ["Abs", "ReduceMax"], [None, (0, 1, 2, 3)]
+    ),
+    InplaceOpTestCase(
+        "mean_var",
+        None,
+        lambda r: get_inplace_mean_var_op(r),
+        ["ReduceMean", "SquaredDifference", "ReduceMean"],
+        [(0, 1, 2, 3), None, (0, 1, 2, 3)],
+    ),
+    InplaceOpTestCase(
+        "max_var",
+        None,
+        lambda r: get_inplace_max_var_op(r),
+        ["ReduceMean", "SquaredDifference", "ReduceMean"],
+        [(0, 1, 2, 3), None, (0, 1, 2, 3)],
+    ),
+    InplaceOpTestCase(
+        "mean_max",
+        None,
+        lambda r: get_inplace_mean_max_op(r, False),
+        ["ReduceMax"],
+        [(0, 1, 2, 3)],
+    ),
+    InplaceOpTestCase(
+        "mean_max",
+        None,
+        lambda r: get_inplace_mean_max_op(r, True),
+        ["Abs", "ReduceMax"],
+        [None, (0, 1, 2, 3)],
+    ),
+    InplaceOpTestCase(
+        "shape",
+        None,
+        lambda r: get_inplace_shape_op(),
+        ["ShapeOf"],
+        [None],
     ),
     # Batch mean and mean per ch operations
-    InplaceOpTestCase("batch_mean", None, lambda o, r: get_inplace_batch_mean_op(o), ["ReduceMean"], [0]),
+    InplaceOpTestCase("batch_mean", None, lambda r: get_inplace_batch_mean_op(), ["ReduceMean"], [0]),
     InplaceOpTestCase("mean_per_ch", 1, get_inplace_mean_per_ch, ["Reshape", "ReduceMean"], [(1, 3, 16), (0, 2)]),
     InplaceOpTestCase(
         "mean_per_ch",
@@ -153,8 +249,32 @@ INPLACE_OPS_TEST_CASES = [
     # EmptyCase
     InplaceOpTestCase("min", (), get_inplace_min_op, ["ReduceMin"], [()]),
     InplaceOpTestCase("mean", (), get_inplace_mean_op, ["ReduceMean"], [()]),
-    InplaceOpTestCase("max", (), lambda o, r: get_inplace_max_op(o, r, False), ["ReduceMax"], [()]),
-    InplaceOpTestCase("abs_max", (), lambda o, r: get_inplace_max_op(o, r, True), ["Abs", "ReduceMax"], [None, ()]),
+    InplaceOpTestCase("max", (), lambda r: get_inplace_max_op(r, False), ["ReduceMax"], [()]),
+    InplaceOpTestCase("abs_max", (), lambda r: get_inplace_max_op(r, True), ["Abs", "ReduceMax"], [None, ()]),
+    InplaceOpTestCase(
+        "mean_var",
+        (),
+        lambda r: get_inplace_mean_var_op(r),
+        ["ReduceMean", "SquaredDifference", "ReduceMean", "ReduceMean"],
+        [(), None, (), (0, 1, 2, 3)],
+    ),
+    InplaceOpTestCase(
+        "max_var",
+        (),
+        lambda r: get_inplace_max_var_op(r),
+        ["ReduceMean", "SquaredDifference", "ReduceMean", "ReduceMax"],
+        [(), None, (), (0, 1, 2, 3)],
+    ),
+    InplaceOpTestCase(
+        "mean_max", (), lambda r: get_inplace_mean_max_op(r, False), ["ReduceMax", "ReduceMean"], [(), (0, 1, 2, 3)]
+    ),
+    InplaceOpTestCase(
+        "mean_max",
+        (),
+        lambda r: get_inplace_mean_max_op(r, True),
+        ["Abs", "ReduceMax", "ReduceMean"],
+        [None, (), (0, 1, 2, 3)],
+    ),
 ]
 
 
@@ -175,7 +295,7 @@ def get_node_by_name(model: ov.Model, name: str):
 def check_inplace_op(target_node, ref_types, ref_vals, inplace_branches_num, output_port_id):
     next_nodes = get_next_nodes(target_node, output_port_id)
     first_inplace_op = [node for node in next_nodes if node.type_info.name == ref_types[0]]
-    assert len(first_inplace_op) == inplace_branches_num
+    assert len(set(first_inplace_op)) == inplace_branches_num
     node = first_inplace_op[0]
     for t, ref_val in zip(ref_types, ref_vals):
         assert node.type_info.name == t
@@ -195,6 +315,22 @@ def check_inplace_op(target_node, ref_types, ref_vals, inplace_branches_num, out
         node = nodes[0]
 
 
+def get_model_with_inplace_ops(model, test_params, target_layers, ref_output_names, target_type, port_id):
+    transformation_layout = TransformationLayout()
+    for target_layer, output_name in zip(target_layers, ref_output_names):
+        target_point = OVTargetPoint(target_type, target_layer, port_id=port_id)
+        command = OVInplaceFnInsertionCommand(
+            target_point,
+            inplace_op_fn=test_params.op_builder(test_params.reduce_shape),
+            fn_output_port_id=0,
+            last_inplace_node_name=output_name,
+        )
+        transformation_layout.register(command)
+
+    model_transformer = OVModelTransformer(model)
+    return model_transformer.transform(transformation_layout)
+
+
 @pytest.mark.parametrize("test_params", INPLACE_OPS_TEST_CASES, ids=[str(case) for case in INPLACE_OPS_TEST_CASES])
 @pytest.mark.parametrize(
     "target_type", [TargetType.PRE_LAYER_OPERATION, TargetType.POST_LAYER_OPERATION, TargetType.OPERATION_WITH_WEIGHTS]
@@ -204,16 +340,10 @@ def test_inplace_fn_insertion(test_params: InplaceOpTestCase, target_type, targe
     dims = LINEAR_MODEL_SHAPES[test_params.dims]
     model = LinearModel(**dims).ov_model
     port_id = 1 if target_type == TargetType.OPERATION_WITH_WEIGHTS else 0
-    transformed_model = create_transformed_model(
-        model,
-        target_layers,
-        target_type,
-        OVInplaceFnInsertionCommand,
-        port_id,
-        {
-            "inplace_op_fn": test_params.op_builder(test_params.name, test_params.reduce_shape),
-            "fn_output_port_id": 0,
-        },
+
+    ref_output_names = [f"test_output_name_{i}" for i in range(len(target_layers))]
+    transformed_model = get_model_with_inplace_ops(
+        model, test_params, target_layers, ref_output_names, target_type, port_id
     )
 
     inplace_branches_num = 1
@@ -234,11 +364,7 @@ def test_inplace_fn_insertion(test_params: InplaceOpTestCase, target_type, targe
     default_output_fn_port = 0
     extra_outputs = get_extra_outputs(model, transformed_model)
     ref_output_names = [
-        get_result_node_name(
-            get_ov_model_reduce_node_name(target_node.get_friendly_name(), test_params.name, port_id),
-            default_output_fn_port,
-        )
-        for target_node, port_id in target_nodes
+        get_result_node_name(ref_output_name, default_output_fn_port) for ref_output_name in ref_output_names
     ]
     assert len(extra_outputs) == len(ref_output_names)
     for out_name in extra_outputs:
@@ -264,8 +390,9 @@ def test_split_inplace_fn_insertion(test_params: InplaceOpTestCase):
         OVInplaceFnInsertionCommand,
         port_id,
         {
-            "inplace_op_fn": test_params.op_builder(test_params.name, test_params.reduce_shape),
+            "inplace_op_fn": test_params.op_builder(test_params.reduce_shape),
             "fn_output_port_id": 0,
+            "last_inplace_node_name": test_params.name,
         },
     )
 
@@ -274,10 +401,7 @@ def test_split_inplace_fn_insertion(test_params: InplaceOpTestCase):
 
     default_output_fn_port = 0
     extra_outputs = get_extra_outputs(model, transformed_model)
-    ref_output_name = get_result_node_name(
-        get_ov_model_reduce_node_name(target_node.get_friendly_name(), test_params.name, port_id),
-        default_output_fn_port,
-    )
+    ref_output_name = get_result_node_name(test_params.name, default_output_fn_port)
     assert len(extra_outputs) == 1
     assert ref_output_name in extra_outputs
 
@@ -288,12 +412,12 @@ def test_split_inplace_fn_insertion(test_params: InplaceOpTestCase):
 )
 def test_inplace_reduce_fn_dynamic_shapes(input_shape, raise_error):
     input_1 = opset.parameter(input_shape, name="Input")
-    fn = get_inplace_min_op("test", reduction_axes=None)
+    fn = get_inplace_min_op(reduction_axes=None)
     if raise_error:
-        with pytest.raises(RuntimeError):
-            fn(input_1, 0)
+        with pytest.raises(nncf.ValidationError):
+            fn(input_1, 0, "test")
         return
-    op = fn(input_1, 0)
+    op = fn(input_1, 0, "test")
     # check_const
     ref_const = np.array([0, 1, 2, 3])
     assert all(np.equal(get_prev_node(op, 1).data, ref_const))
@@ -312,80 +436,94 @@ def test_inplace_reduce_fn_zero_rank_output(reduction_axes):
         OVInplaceFnInsertionCommand,
         port_id,
         {
-            "inplace_op_fn": get_inplace_min_op(name, reduction_axes=reduction_axes),
+            "inplace_op_fn": get_inplace_min_op(reduction_axes=reduction_axes),
             "fn_output_port_id": 0,
+            "last_inplace_node_name": name,
         },
     )
     target_node = get_prev_node(get_node_by_name(transformed_model, target_layer), 1)
     check_inplace_op(target_node, ["ReduceMin"], [[]], 1, 0)
     extra_outputs = get_extra_outputs(model, transformed_model)
-    ref_output_name = get_result_node_name(get_ov_model_reduce_node_name(target_node.get_friendly_name(), name, 0), 0)
+    ref_output_name = get_result_node_name(name, 0)
     assert len(extra_outputs) == 1
     assert extra_outputs.pop() == ref_output_name
 
 
 DYNAMIC_SHAPE_TEST_CASES = [
-    InplaceOpTestCase("mean_per_ch", 1, get_inplace_mean_per_ch, ["Reshape"], [(-1, 3, 9), (0, 2)]),
+    InplaceOpTestCase("mean_per_ch", 1, get_inplace_mean_per_ch, ["Reshape"], [(0, 3, 9), (0, 2)]),
+    InplaceOpTestCase("mean_per_ch", 1, get_inplace_mean_per_ch, ["Reshape"], [(0, 0, 9), (0, 2)]),
     InplaceOpTestCase("mean_per_ch", 1, get_inplace_mean_per_ch, ["Reshape"], [(1, 3, -1), (0, 2)]),
-    InplaceOpTestCase("mean_per_ch", 3, get_inplace_mean_per_ch, ["Transpose", "Reshape"], [(0, 3, 2, 1), (-1, 3, 9)]),
-    InplaceOpTestCase("mean_per_ch", 3, get_inplace_mean_per_ch, ["Transpose", "Reshape"], [(0, 3, 2, 1), (1, -1, 9)]),
+    InplaceOpTestCase("mean_per_ch", 1, get_inplace_mean_per_ch, ["Reshape"], [(1, 0, -1), (0, 2)]),
+    InplaceOpTestCase("mean_per_ch", 3, get_inplace_mean_per_ch, ["Transpose", "Reshape"], [(0, 3, 2, 1), (0, 3, 9)]),
+    InplaceOpTestCase("mean_per_ch", 3, get_inplace_mean_per_ch, ["Transpose", "Reshape"], [(0, 3, 2, 1), (1, 0, 9)]),
     InplaceOpTestCase("mean_per_ch", 3, get_inplace_mean_per_ch, ["Transpose", "Reshape"], [(0, 3, 2, 1), (1, 3, -1)]),
+    InplaceOpTestCase("mean_per_ch", 3, get_inplace_mean_per_ch, ["Transpose", "Reshape"], [(0, 3, 2, 1), (1, 0, -1)]),
 ]
 
 
 @pytest.mark.parametrize(
-    "test_params,input_shape,raise_error",
+    "test_params,input_shape",
     [
-        (DYNAMIC_SHAPE_TEST_CASES[0], (ov.Dimension(), 3, 3, 3), False),
-        (DYNAMIC_SHAPE_TEST_CASES[1], (1, 3, 3, ov.Dimension()), False),
-        (DYNAMIC_SHAPE_TEST_CASES[0], (ov.Dimension(), ov.Dimension(), 3, 3), True),
-        (DYNAMIC_SHAPE_TEST_CASES[1], (1, 3, ov.Dimension(), ov.Dimension()), False),
-        (DYNAMIC_SHAPE_TEST_CASES[1], (1, ov.Dimension(), ov.Dimension(), 3), True),
-        (DYNAMIC_SHAPE_TEST_CASES[2], (ov.Dimension(), 3, 3, 3), False),
-        (DYNAMIC_SHAPE_TEST_CASES[3], (1, 3, 3, ov.Dimension()), False),
-        (DYNAMIC_SHAPE_TEST_CASES[4], (1, ov.Dimension(), ov.Dimension(), 3), False),
-        (DYNAMIC_SHAPE_TEST_CASES[4], (1, ov.Dimension(), ov.Dimension(), ov.Dimension()), True),
+        (DYNAMIC_SHAPE_TEST_CASES[0], (ov.Dimension(), 3, 3, 3)),
+        (DYNAMIC_SHAPE_TEST_CASES[2], (1, 3, 3, ov.Dimension())),
+        (DYNAMIC_SHAPE_TEST_CASES[1], (ov.Dimension(), ov.Dimension(), 3, 3)),
+        (DYNAMIC_SHAPE_TEST_CASES[2], (1, 3, ov.Dimension(), ov.Dimension())),
+        (DYNAMIC_SHAPE_TEST_CASES[3], (1, ov.Dimension(), ov.Dimension(), 3)),
+        (DYNAMIC_SHAPE_TEST_CASES[4], (ov.Dimension(), 3, 3, 3)),
+        (DYNAMIC_SHAPE_TEST_CASES[5], (1, 3, 3, ov.Dimension())),
+        (DYNAMIC_SHAPE_TEST_CASES[6], (1, ov.Dimension(), ov.Dimension(), 3)),
+        (DYNAMIC_SHAPE_TEST_CASES[7], (1, ov.Dimension(), ov.Dimension(), ov.Dimension())),
     ],
 )
-def test_inplace_mean_per_ch_fn_dynamic_shapes(test_params: InplaceOpTestCase, input_shape, raise_error):
+def test_inplace_mean_per_ch_fn_dynamic_shapes(test_params: InplaceOpTestCase, input_shape):
     input_1 = opset.parameter(input_shape, name="Input")
-    fn = test_params.op_builder(test_params.name, test_params.reduce_shape)
-    if raise_error:
-        with pytest.raises(RuntimeError):
-            fn(input_1, 0)
-        return
-    fn(input_1, 0)
-    check_inplace_op(input_1, test_params.ref_types, test_params.ref_values, 1, 0)
+    fn = test_params.op_builder(test_params.reduce_shape)
+    last_node = fn(input_1, 0, test_params.name)
+    result = opset.result(last_node)
+    model = ov.Model([result], [input_1])
+    check_inplace_op(model.input().get_node(), test_params.ref_types, test_params.ref_values, 1, 0)
 
 
 @pytest.mark.parametrize(
     "target_type", [TargetType.PRE_LAYER_OPERATION, TargetType.POST_LAYER_OPERATION, TargetType.OPERATION_WITH_WEIGHTS]
 )
+@pytest.mark.parametrize(
+    "model_object",
+    [
+        LinearModel().ov_model,
+        FPModel(input_dtype=ov.Type.bf16).ov_model,
+        FPModel(const_dtype=ov.Type.bf16).ov_model,
+        FPModel(const_dtype=ov.Type.bf16, input_dtype=ov.Type.bf16).ov_model,
+    ],
+)
 @pytest.mark.parametrize("target_layers", TARGET_INSERT_LAYERS)
-def test_output_insertion(target_type, target_layers):
-    model = LinearModel().ov_model
+def test_output_insertion(target_type, target_layers, model_object):
     port_id = 1 if target_type == TargetType.OPERATION_WITH_WEIGHTS else 0
-    transformed_model = create_transformed_model(model, target_layers, target_type, OVOutputInsertionCommand, port_id)
+    transformed_model = create_transformed_model(
+        model_object, target_layers, target_type, OVOutputInsertionCommand, port_id
+    )
 
-    if target_type == TargetType.PRE_LAYER_OPERATION:
-        target_layers = ["Reshape"]
-
-    target_nodes = []
+    target_nodes = set()
     for target_layer in target_layers:
         target_node = get_node_by_name(transformed_model, target_layer)
         if target_type == TargetType.OPERATION_WITH_WEIGHTS:
             source_output = target_node.input(1).get_source_output()
             target_node = source_output.get_node()
             port_id = source_output.get_index()
-        target_nodes.append((target_node, port_id))
+        elif target_type == TargetType.PRE_LAYER_OPERATION:
+            source_output = target_node.input(0).get_source_output()
+            target_node = source_output.get_node()
+        target_nodes.add((target_node, port_id))
 
-    extra_outputs = get_extra_outputs(model, transformed_model)
+    extra_outputs = get_extra_outputs(model_object, transformed_model, as_nodes=True)
     ref_output_names = [
         get_result_node_name(target_node.get_friendly_name(), port_id) for target_node, port_id in target_nodes
     ]
     assert len(extra_outputs) == len(ref_output_names)
-    for out_name in extra_outputs:
-        assert out_name in ref_output_names
+    for extra_output in extra_outputs:
+        extra_output_name = extra_output.get_friendly_name()
+        assert extra_output_name in ref_output_names
+        assert extra_output.output(0).get_element_type() == ov.Type.f32
 
 
 @pytest.mark.parametrize("test_params", INPLACE_OPS_TEST_CASES, ids=[str(case) for case in INPLACE_OPS_TEST_CASES])
@@ -424,85 +562,196 @@ def test_node_removing(target_layers):
 
     transformed_model = model_transformer.transform(transformation_layout)
     ref_name = "removed_nodes_in_" + model_to_test.ref_graph_name
-    compare_nncf_graphs(transformed_model, REFERENCE_GRAPHS_DIR / ref_name)
+    compare_nncf_graphs(transformed_model, get_actual_reference_for_current_openvino(REFERENCE_GRAPHS_DIR / ref_name))
 
 
 @pytest.mark.parametrize("target_layers, ref_fq_names", zip(TARGET_INSERT_LAYERS, TARGET_PRE_LAYER_FQS))
-def test_fq_insertion_pre_layer(target_layers, ref_fq_names):
-    model = LinearModel().ov_model
-
-    min_values = np.zeros((1, 1, 1, 1)).astype(np.float32)
-    max_values = np.ones((1, 1, 1, 1)).astype(np.float32)
-    quantizer_parameters = FakeQuantizeParameters(min_values, max_values, min_values, max_values, levels=256)
-
+@pytest.mark.parametrize(
+    "model_object",
+    [
+        LinearModel().ov_model,
+        FPModel(input_dtype=ov.Type.bf16).ov_model,
+        FPModel(const_dtype=ov.Type.bf16).ov_model,
+        FPModel(const_dtype=ov.Type.bf16, input_dtype=ov.Type.bf16).ov_model,
+    ],
+)
+def test_fq_insertion_pre_layer(target_layers, ref_fq_names, model_object):
     transformed_model = create_transformed_model(
-        model,
+        model_object,
         target_layers,
         TargetType.PRE_LAYER_OPERATION,
         OVQuantizerInsertionCommand,
-        command_kwargs={"quantizer_parameters": quantizer_parameters},
+        command_kwargs={"quantizer_parameters": create_fake_quantize_params()},
     )
-    fq_nodes = get_fq_nodes(transformed_model)
+    fq_nodes = get_nodes_by_type(transformed_model, type_name="FakeQuantize")
 
     assert len(fq_nodes) == len(ref_fq_names)
-    for fq_name in fq_nodes:
+    for fq_node in fq_nodes:
+        fq_name = fq_node.get_friendly_name()
         assert fq_name in ref_fq_names
+        verify_inputs_equality(fq_node)
+
+
+@pytest.mark.parametrize("target_layers, ref_fc_names", zip(TARGET_INSERT_LAYERS, TARGET_PRE_LAYER_FCS))
+@pytest.mark.parametrize(
+    "model_object",
+    [
+        LinearModel().ov_model,
+        FPModel(input_dtype=ov.Type.bf16).ov_model,
+        FPModel(const_dtype=ov.Type.bf16).ov_model,
+        FPModel(const_dtype=ov.Type.bf16, input_dtype=ov.Type.bf16).ov_model,
+    ],
+)
+def test_fc_insertion_pre_layer(target_layers, ref_fc_names, model_object):
+    transformed_model = create_transformed_model(
+        model_object,
+        target_layers,
+        TargetType.PRE_LAYER_OPERATION,
+        OVConvertInsertionCommand,
+        command_kwargs={"convert_parameters": create_fake_convert_params(destination_type=FP8Type.E4M3)},
+    )
+    fc_nodes = get_nodes_by_type(transformed_model, type_name="FakeConvert")
+
+    assert len(fc_nodes) == len(ref_fc_names)
+    for fc_node in fc_nodes:
+        fc_name = fc_node.get_friendly_name()
+        assert fc_name in ref_fc_names
+        verify_inputs_equality(fc_node)
 
 
 @pytest.mark.parametrize("target_layers, ref_fq_names", zip(TARGET_INSERT_LAYERS, TARGET_POST_LAYER_FQS))
-def test_fq_insertion_post_layer(target_layers, ref_fq_names):
-    model = LinearModel().ov_model
-
-    min_values = np.zeros((1, 1, 1, 1)).astype(np.float32)
-    max_values = np.ones((1, 1, 1, 1)).astype(np.float32)
-    quantizer_parameters = FakeQuantizeParameters(min_values, max_values, min_values, max_values, levels=256)
+@pytest.mark.parametrize(
+    "model_object",
+    [
+        LinearModel().ov_model,
+        FPModel(input_dtype=ov.Type.bf16).ov_model,
+        FPModel(const_dtype=ov.Type.bf16).ov_model,
+        FPModel(const_dtype=ov.Type.bf16, input_dtype=ov.Type.bf16).ov_model,
+    ],
+)
+def test_fq_insertion_post_layer(target_layers, ref_fq_names, model_object):
     transformed_model = create_transformed_model(
-        model,
+        model_object,
         target_layers,
         TargetType.POST_LAYER_OPERATION,
         OVQuantizerInsertionCommand,
-        command_kwargs={"quantizer_parameters": quantizer_parameters},
+        command_kwargs={"quantizer_parameters": create_fake_quantize_params()},
     )
-    fq_nodes = get_fq_nodes(transformed_model)
+    fq_nodes = get_nodes_by_type(transformed_model, type_name="FakeQuantize")
 
     assert len(fq_nodes) == len(ref_fq_names)
-    for fq_name in fq_nodes:
+    for fq_node in fq_nodes:
+        fq_name = fq_node.get_friendly_name()
         assert fq_name in ref_fq_names
+        verify_inputs_equality(fq_node)
+
+
+@pytest.mark.parametrize("target_layers, ref_fc_names", zip(TARGET_INSERT_LAYERS, TARGET_POST_LAYER_FCS))
+@pytest.mark.parametrize(
+    "model_object",
+    [
+        LinearModel().ov_model,
+        FPModel(input_dtype=ov.Type.bf16).ov_model,
+        FPModel(const_dtype=ov.Type.bf16).ov_model,
+        FPModel(const_dtype=ov.Type.bf16, input_dtype=ov.Type.bf16).ov_model,
+    ],
+)
+def test_fc_insertion_post_layer(target_layers, ref_fc_names, model_object):
+    transformed_model = create_transformed_model(
+        model_object,
+        target_layers,
+        TargetType.POST_LAYER_OPERATION,
+        OVConvertInsertionCommand,
+        command_kwargs={"convert_parameters": create_fake_convert_params(destination_type=FP8Type.E4M3)},
+    )
+    fc_nodes = get_nodes_by_type(transformed_model, type_name="FakeConvert")
+
+    assert len(fc_nodes) == len(ref_fc_names)
+    for fc_node in fc_nodes:
+        fc_name = fc_node.get_friendly_name()
+        assert fc_name in ref_fc_names
+        verify_inputs_equality(fc_node)
 
 
 @pytest.mark.parametrize("target_layers, ref_fq_names", zip(TARGET_INSERT_LAYERS, TARGET_WEIGHTS_FQS))
-def test_fq_insertion_weights(target_layers, ref_fq_names):
-    model = LinearModel().ov_model
-
-    min_values = np.zeros((1, 1, 1, 1)).astype(np.float32)
-    max_values = np.ones((1, 1, 1, 1)).astype(np.float32)
-    quantizer_parameters = FakeQuantizeParameters(min_values, max_values, min_values, max_values, levels=256)
+@pytest.mark.parametrize(
+    "model_object",
+    [
+        LinearModel().ov_model,
+        FPModel(input_dtype=ov.Type.bf16).ov_model,
+        FPModel(const_dtype=ov.Type.bf16).ov_model,
+        FPModel(const_dtype=ov.Type.bf16, input_dtype=ov.Type.bf16).ov_model,
+    ],
+)
+def test_fq_insertion_weights(target_layers, ref_fq_names, model_object):
     transformed_model = create_transformed_model(
-        model,
+        model_object,
         target_layers,
         TargetType.OPERATION_WITH_WEIGHTS,
         OVQuantizerInsertionCommand,
-        1,
-        {"quantizer_parameters": quantizer_parameters},
+        port_id=1,
+        command_kwargs={"quantizer_parameters": create_fake_quantize_params()},
     )
-    fq_nodes = get_fq_nodes(transformed_model)
+    fq_nodes = get_nodes_by_type(transformed_model, type_name="FakeQuantize")
 
     assert len(fq_nodes) == len(ref_fq_names)
-    for fq_name in fq_nodes:
+    for fq_node in fq_nodes:
+        fq_name = fq_node.get_friendly_name()
         assert fq_name in ref_fq_names
+        verify_inputs_equality(fq_node)
+
+
+@pytest.mark.parametrize("target_layers, ref_fc_names", zip(TARGET_INSERT_LAYERS, TARGET_WEIGHTS_FCS))
+@pytest.mark.parametrize(
+    "model_object",
+    [
+        LinearModel().ov_model,
+        FPModel(input_dtype=ov.Type.bf16).ov_model,
+        FPModel(const_dtype=ov.Type.bf16).ov_model,
+        FPModel(const_dtype=ov.Type.bf16, input_dtype=ov.Type.bf16).ov_model,
+    ],
+)
+def test_fc_insertion_weights(target_layers, ref_fc_names, model_object):
+    transformed_model = create_transformed_model(
+        model_object,
+        target_layers,
+        TargetType.OPERATION_WITH_WEIGHTS,
+        OVConvertInsertionCommand,
+        port_id=1,
+        command_kwargs={"convert_parameters": create_fake_convert_params(destination_type=FP8Type.E4M3)},
+    )
+    fc_nodes = get_nodes_by_type(transformed_model, type_name="FakeConvert")
+
+    assert len(fc_nodes) == len(ref_fc_names)
+    for fc_node in fc_nodes:
+        fc_name = fc_node.get_friendly_name()
+        assert fc_name in ref_fc_names
+        verify_inputs_equality(fc_node)
 
 
 MODELS_WITH_PARAMETERS = [
     {
         "model": ConvModel().ov_model,
         "layers": ["Conv"],
-        "values": [np.full((3,), 2)],
+        "values": [np.full((3,), 2).astype(np.float32)],
         "refs": [2.0],
     },
     {
-        "model": FPModel(const_dtype="FP16").ov_model,
+        "model": FPModel(const_dtype=ov.Type.f16).ov_model,
         "layers": ["MatMul"],
-        "values": [np.full((3,), 2)],
+        "values": [np.full((3,), 2).astype(np.float16)],
+        "refs": [2.0],
+    },
+    {
+        "model": FPModel(const_dtype=ov.Type.f16, input_dtype=ov.Type.f16).ov_model,
+        "layers": ["MatMul"],
+        "values": [np.full((3,), 2).astype(np.float16)],
+        "refs": [2.0],
+    },
+    {
+        "model": FPModel(const_dtype=ov.Type.bf16, input_dtype=ov.Type.bf16).ov_model,
+        "layers": ["MatMul"],
+        "values": [np.full((3,), 2).astype(np.float32)],
         "refs": [2.0],
     },
 ]
@@ -529,13 +778,14 @@ def test_bias_correction(model_with_parameters):
         if potential_bias.get_type_name() == "Convert":
             potential_bias = potential_bias.input_value(0).node
         assert potential_bias.get_type_name() == "Constant"
-        assert np.all(potential_bias.get_vector() == bias_reference)
+        potential_bias_value = get_const_value(potential_bias)
+        assert np.all(potential_bias_value == bias_reference)
 
 
 def test_no_transformations():
     def infer_model_with_ones(model, shape):
         ie = ov.Core()
-        compiled_model = ie.compile_model(model)
+        compiled_model = ie.compile_model(model, device_name="CPU")
         _input = np.ones(shape)
         model_outputs = compiled_model(_input)
         return {out.get_node().get_friendly_name(): data for out, data in model_outputs.items()}
@@ -548,7 +798,7 @@ def test_no_transformations():
     ret_val_1 = infer_model_with_ones(model, input_shape)
     ret_val_2 = infer_model_with_ones(transformed_model, input_shape)
     assert ret_val_1.keys() == ret_val_2.keys()
-    for output in ret_val_1.keys():
+    for output in ret_val_1:
         assert np.allclose(ret_val_1[output], ret_val_2[output])
     assert id(transformed_model) != id(model)
 
@@ -592,8 +842,17 @@ def test_null_biases_insertion(model_with_parameters):
 
 
 MODELS_WITH_DATA = [
-    {"model": ConvModel(), "input_layers": ["Conv"], "output_layers": ["Conv"]},
-    {"model": QuantizedModel(), "input_layers": ["Relu_1", "Transpose"], "output_layers": ["Conv_3", "Add_2"]},
+    {"model": ConvModel(), "input_ids": [("Conv", 0)], "output_ids": [("Conv", 0)]},
+    {
+        "model": QuantizedModel(),
+        "input_ids": [("Relu_1", 0), ("Transpose", 0)],
+        "output_ids": [("Conv_3", 0), ("Add_2", 0)],
+    },
+    {
+        "model": FPModel(const_dtype=ov.Type.bf16, input_dtype=ov.Type.bf16),
+        "input_ids": [("MatMul", 0)],
+        "output_ids": [("MatMul", 0)],
+    },
 ]
 
 
@@ -602,13 +861,43 @@ def test_model_extraction(model_with_data):
     model_to_test = model_with_data["model"]
     model = model_to_test.ov_model
     transformation_layout = TransformationLayout()
-    command = OVModelExtractionCommand(model_with_data["input_layers"], model_with_data["output_layers"])
+    command = OVModelExtractionCommand(model_with_data["input_ids"], model_with_data["output_ids"])
     transformation_layout.register(command)
 
     model_transformer = OVModelTransformer(model)
     transformed_model = model_transformer.transform(transformation_layout)
 
-    path_to_dot = REFERENCE_GRAPHS_DIR / f"exctracted_{model_to_test.ref_graph_name}"
+    path_to_dot = get_actual_reference_for_current_openvino(
+        REFERENCE_GRAPHS_DIR / f"exctracted_{model_to_test.ref_graph_name}"
+    )
+    compare_nncf_graphs(transformed_model, path_to_dot)
+
+
+MODELS_WITH_DATA_V2 = [
+    {"model": ConvModel(), "input_ids": [("Sub", 0)], "output_ids": [("Conv", 0)]},
+    {
+        "model": QuantizedModel(),
+        "input_ids": [("Conv_1", 0), ("Transpose/fq_input_0", 0)],
+        "output_ids": [("Conv_3", 0), ("Add_2", 0)],
+    },
+    {"model": StatefulModel(stateful=True), "input_ids": [("input_data", 0)], "output_ids": [("MemoryAdd", 0)]},
+]
+
+
+@pytest.mark.parametrize("model_with_data", MODELS_WITH_DATA_V2)
+def test_stateless_model_extraction(model_with_data):
+    model_to_test = model_with_data["model"]
+    model = model_to_test.ov_model
+    transformation_layout = TransformationLayout()
+    command = OVStateLessModelExtractionCommand(model_with_data["input_ids"], model_with_data["output_ids"])
+    transformation_layout.register(command)
+
+    model_transformer = OVModelTransformer(model)
+    transformed_model = model_transformer.transform(transformation_layout)
+
+    path_to_dot = get_actual_reference_for_current_openvino(
+        REFERENCE_GRAPHS_DIR / f"exctracted_{model_to_test.ref_graph_name}"
+    )
     compare_nncf_graphs(transformed_model, path_to_dot)
 
 
@@ -623,6 +912,12 @@ MODELS_WITH_PARAMETERS = [
         "model": WeightsModel().ov_model,
         "layers": ["MatMul_1"],
         "destination_node_names": ["MatMul_0"],
+        "scale": np.ones((1, 1, 1, 1)),
+    },
+    {
+        "model": FPModel(const_dtype=ov.Type.bf16, input_dtype=ov.Type.bf16).ov_model,
+        "layers": ["Input"],
+        "destination_node_names": ["MatMul"],
         "scale": np.ones((1, 1, 1, 1)),
     },
 ]
@@ -658,7 +953,9 @@ def test_multiply_insertion(model_with_parameters):
         assert scale_node.get_type_name() == "Multiply"
         scale_const = scale_node.input(1).get_source_output().get_node()
 
+        assert scale_node.input(0).get_element_type() == scale_const.output(0).get_element_type()
+
         assert scale_const.get_type_name() == "Constant"
-        scale_const_data = scale_const.data
+        scale_const_data = get_const_value(scale_const)
 
         assert np.all(scale_const_data == scale)

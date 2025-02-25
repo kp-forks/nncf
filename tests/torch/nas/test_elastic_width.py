@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -16,7 +16,7 @@ from torch import nn
 
 from nncf.experimental.torch.nas.bootstrapNAS.elasticity.visualization import SubnetGraph
 from nncf.torch.utils import get_model_device
-from tests.shared.nx_graph import compare_nx_graph_with_reference
+from tests.cross_fw.shared.nx_graph import compare_nx_graph_with_reference
 from tests.torch.helpers import create_conv
 from tests.torch.helpers import get_empty_config
 from tests.torch.nas.creators import create_bootstrap_nas_training_algo
@@ -26,6 +26,7 @@ from tests.torch.nas.helpers import compare_tensors_ignoring_the_order
 from tests.torch.nas.helpers import move_model_to_cuda_if_available
 from tests.torch.nas.models.synthetic import ConvTwoFcTestModel
 from tests.torch.nas.models.synthetic import TwoConvAddConvTestModel
+from tests.torch.nas.models.synthetic import TwoConvMeanModel
 from tests.torch.nas.models.synthetic import TwoSequentialConvBNTestModel
 from tests.torch.nas.models.synthetic import TwoSequentialFcLNTestModel
 from tests.torch.nas.test_all_elasticity import NAS_MODELS_SCOPE
@@ -75,6 +76,21 @@ def test_set_elastic_width_by_value_not_from_list():
     width_handler, _ = create_two_conv_width_supernet()
     with pytest.raises(ValueError):
         width_handler.activate_subnet_for_config({0: 16})
+
+
+def test_add_dynamic_inputs():
+    elasticity_params = {
+        "width": {
+            "overwrite_groups": [["TwoConvMeanModel/NNCFConv2d[conv1]/conv2d_0"]],
+            "overwrite_groups_widths": [[3, 1]],
+            "add_dynamic_inputs": ["TwoConvMeanModel/NNCFConv2d[last_conv]/conv2d_0"],
+        }
+    }
+    width_handler, _ = create_two_conv_width_supernet(elasticity_params=elasticity_params, model=TwoConvMeanModel)
+    width_handler.activate_minimum_subnet()
+    input_channel, output_channel = width_handler.get_active_in_out_width_values()
+    assert input_channel["TwoConvMeanModel/NNCFConv2d[last_conv]/conv2d_0"] == 1
+    assert output_channel["TwoConvMeanModel/NNCFConv2d[conv1]/conv2d_0"] == 1
 
 
 ###########################

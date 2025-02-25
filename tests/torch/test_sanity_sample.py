@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -32,12 +32,12 @@ from nncf.common.compression import BaseCompressionAlgorithmController as BaseCo
 from nncf.common.compression import BaseControllerStateNames
 from nncf.common.hardware.config import HWConfigType
 from nncf.config import NNCFConfig
-from tests.shared.command import arg_list_from_arg_dict
-from tests.shared.config_factory import ConfigFactory
-from tests.shared.helpers import remove_line_breaks
-from tests.shared.paths import ROOT_PYTHONPATH_ENV
-from tests.shared.paths import TEST_ROOT
-from tests.shared.paths import get_accuracy_aware_checkpoint_dir_path
+from tests.cross_fw.shared.command import arg_list_from_arg_dict
+from tests.cross_fw.shared.config_factory import ConfigFactory
+from tests.cross_fw.shared.helpers import remove_line_breaks
+from tests.cross_fw.shared.paths import ROOT_PYTHONPATH_ENV
+from tests.cross_fw.shared.paths import TEST_ROOT
+from tests.cross_fw.shared.paths import get_accuracy_aware_checkpoint_dir_path
 from tests.torch.helpers import Command
 from tests.torch.sample_test_validator import create_command_line
 
@@ -56,7 +56,6 @@ CONFIGS = {
     "classification": [
         TEST_ROOT / "torch" / "data" / "configs" / "squeezenet1_1_cifar10_rb_sparsity_int8.json",
         TEST_ROOT / "torch" / "data" / "configs" / "inception_v3_mock_dataset.json",
-        TEST_ROOT / "torch" / "data" / "configs" / "resnet18_cifar100_bin_xnor.json",
         TEST_ROOT / "torch" / "data" / "configs" / "resnet18_cifar10_staged_quant.json",
         TEST_ROOT / "torch" / "data" / "configs" / "resnet18_imagenet_pruning_magnitude.json",
         TEST_ROOT / "torch" / "data" / "configs" / "resnet18_imagenet_pruning_learned_ranking.json",
@@ -144,7 +143,7 @@ def update_compression_algo_dict_with_legr_save_load_params(nncf_config, tmp_pat
 
 
 def extract_compression_stage_from_checkpoint(last_checkpoint_path: str) -> CompressionStage:
-    compression_state = torch.load(last_checkpoint_path)[COMPRESSION_STATE_ATTR]
+    compression_state = torch.load(last_checkpoint_path, weights_only=False)[COMPRESSION_STATE_ATTR]
     ctrl_state = compression_state[BaseController.CONTROLLER_STATE]
     compression_stage = next(iter(ctrl_state.values()))[BaseControllerStateNames.COMPRESSION_STAGE]
     return compression_stage
@@ -185,7 +184,7 @@ class TestSanitySample:
         with config_path.open() as f:
             jconfig = json.load(f)
 
-        if "checkpoint_save_dir" in jconfig.keys():
+        if "checkpoint_save_dir" in jconfig:
             del jconfig["checkpoint_save_dir"]
 
         # Use a reduced number of BN adaptation samples for speed
@@ -397,7 +396,7 @@ class TestSanitySample:
             "--mode": "export",
             "--config": config_factory.serialize(),
             "--resume": ckpt_path,
-            "--to-onnx": onnx_path,
+            "--export-model-path": onnx_path,
         }
 
         if not torch.cuda.is_available():
@@ -422,7 +421,12 @@ class TestSanitySample:
         config_factory = ConfigFactory(config, tmp_path / "config.json")
 
         onnx_path = os.path.join(str(tmp_path), "model.onnx")
-        args = {"--mode": "export", "--config": config_factory.serialize(), "--pretrained": "", "--to-onnx": onnx_path}
+        args = {
+            "--mode": "export",
+            "--config": config_factory.serialize(),
+            "--pretrained": "",
+            "--export-model-path": onnx_path,
+        }
 
         if not torch.cuda.is_available():
             args["--cpu-only"] = True
@@ -454,9 +458,6 @@ class TestSanitySample:
             "--cpu-only": True,
         }
 
-        # to prevent starting a not closed mlflow session due to memory leak of config and SafeMLFLow happens with a
-        # mocked train function
-        mocker.patch("examples.torch.common.utils.SafeMLFLow")
         arg_list = arg_list_from_arg_dict(args)
         if config["sample_type"] == "classification":
             import examples.torch.classification.main as sample
