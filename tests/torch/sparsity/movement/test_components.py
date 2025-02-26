@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -323,7 +323,6 @@ class TestFunctions:
         ],
     )
     @pytest.mark.parametrize("requires_grad", [True, False])
-    @pytest.mark.parametrize("use_cuda", [True, False])
     def test_binary_mask_by_threshold(
         self,
         input_tensor: torch.Tensor,
@@ -385,6 +384,7 @@ class TestImportanceLoss:
             assert output.requires_grad is requires_grad
             assert torch.allclose(output, torch.tensor(desc["ref_output"]))
 
+    @pytest.mark.cuda
     def test_importance_loss_adapts_to_device_change(self):
         if not torch.cuda.is_available():
             pytest.skip("requires GPU")

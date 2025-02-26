@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -76,7 +76,9 @@ def test_can_restore_binary_mask_on_magnitude_algo_resume():
     PTTensorListComparator.check_equal(ref_mask_2, op.operand.binary_mask)
 
 
-@pytest.mark.parametrize("use_data_parallel", [True, False], ids=["dataparallel", "regular"])
+@pytest.mark.parametrize(
+    "use_data_parallel", [pytest.param(True, marks=pytest.mark.cuda), False], ids=["dataparallel", "regular"]
+)
 def test_can_restore_binary_mask_on_magnitude_quant_algo_resume(tmp_path, use_data_parallel):
     config = get_empty_config()
     config["compression"] = [

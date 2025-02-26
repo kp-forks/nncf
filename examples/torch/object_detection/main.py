@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -37,14 +37,12 @@ from examples.torch.common.model_loader import extract_model_and_compression_sta
 from examples.torch.common.model_loader import load_resuming_checkpoint
 from examples.torch.common.optimizer import get_parameter_groups
 from examples.torch.common.optimizer import make_optimizer
-from examples.torch.common.utils import SafeMLFLow
 from examples.torch.common.utils import configure_device
 from examples.torch.common.utils import configure_logging
 from examples.torch.common.utils import create_code_snapshot
 from examples.torch.common.utils import get_run_name
 from examples.torch.common.utils import is_on_first_rank
 from examples.torch.common.utils import is_pretrained_model_requested
-from examples.torch.common.utils import log_common_mlflow_params
 from examples.torch.common.utils import make_additional_checkpoints
 from examples.torch.common.utils import print_args
 from examples.torch.common.utils import write_metrics
@@ -110,7 +108,6 @@ def main_worker(current_gpu, config):
     # Setup experiment environment
     #################################
     configure_device(current_gpu, config)
-    config.mlflow = SafeMLFLow(config)
     if is_on_first_rank(config):
         configure_logging(logger, config)
         print_args(config)
@@ -222,11 +219,8 @@ def main_worker(current_gpu, config):
         optimizer.load_state_dict(resuming_checkpoint.get("optimizer", optimizer.state_dict()))
         config.start_epoch = resuming_checkpoint.get("epoch", 0) + 1
 
-    log_common_mlflow_params(config)
-
     if is_export_only:
-        export_model(compression_ctrl, config.to_onnx, config.no_strip_on_export)
-        logger.info(f"Saved to {config.to_onnx}")
+        export_model(compression_ctrl, config)
         return
 
     if is_main_process():
@@ -296,21 +290,20 @@ def main_worker(current_gpu, config):
                     loss_inference=True,
                     criterion=criterion,
                 )
-                logger.info("Final model loss: {:.3f}".format(model_loss))
+                logger.info(f"Final model loss: {model_loss:.3f}")
             else:
                 mAp = test_net(val_net, config.device, test_data_loader, distributed=config.distributed)
                 if config.metrics_dump is not None:
                     write_metrics(mAp, config.metrics_dump)
 
     if "export" in config.mode:
-        export_model(compression_ctrl, config.to_onnx, config.no_strip_on_export)
-        logger.info(f"Saved to {config.to_onnx}")
+        export_model(compression_ctrl, config)
 
 
 def create_dataloaders(config):
     logger.info("Loading Dataset...")
     train_dataset = get_training_dataset(config.dataset, config.train_anno, config.train_imgs, config)
-    logger.info("Loaded {} training images".format(len(train_dataset)))
+    logger.info(f"Loaded {len(train_dataset)} training images")
     if config.distributed:
         sampler_seed = 0 if config.seed is None else config.seed
         dist_sampler_shuffle = config.seed is None
@@ -344,7 +337,7 @@ def create_dataloaders(config):
         init_data_loader = deepcopy(train_data_loader)
 
     test_dataset = get_testing_dataset(config.dataset, config.test_anno, config.test_imgs, config)
-    logger.info("Loaded {} testing images".format(len(test_dataset)))
+    logger.info(f"Loaded {len(test_dataset)} testing images")
     if config.distributed:
         test_sampler = DistributedSampler(test_dataset, config.rank, config.world_size)
     else:
@@ -368,7 +361,7 @@ def create_model(config: SampleConfig):
     ssd_net = build_ssd(config.model, config.ssd_params, image_size, config.num_classes, config)
     weights = config.get("weights")
     if weights:
-        sd = torch.load(weights, map_location="cpu", pickle_module=restricted_pickle_module)
+        sd = torch.load(weights, map_location="cpu", pickle_module=restricted_pickle_module, weights_only=False)
         sd = sd["state_dict"]
         load_state(ssd_net, sd)
 
@@ -422,7 +415,7 @@ def train(net, compression_ctrl, train_data_loader, test_data_loader, criterion,
     conf_loss = 0
 
     epoch_size = len(train_data_loader)
-    logger.info("Training {} on {} dataset...".format(config.model, train_data_loader.dataset.name))
+    logger.info(f"Training {config.model} on {train_data_loader.dataset.name} dataset...")
 
     best_mAp = 0
     best_compression_stage = CompressionStage.UNCOMPRESSED
@@ -468,9 +461,9 @@ def train(net, compression_ctrl, train_data_loader, test_data_loader, criterion,
                 net.train()
 
         if is_on_first_rank(config):
-            logger.info("Saving state, epoch: {}".format(epoch))
+            logger.info(f"Saving state, epoch: {epoch}")
 
-            checkpoint_file_path = osp.join(config.checkpoint_save_dir, "{}_last.pth".format(get_run_name(config)))
+            checkpoint_file_path = osp.join(config.checkpoint_save_dir, f"{get_run_name(config)}_last.pth")
             torch.save(
                 {
                     MODEL_STATE_ATTR: net.state_dict(),

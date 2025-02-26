@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -60,9 +60,13 @@ class TrainedSuperNet:
         :return: SuperNetwork with wrapped functionality.
         """
         nncf_network = create_nncf_network(model, nncf_config)
-        compression_state = torch.load(supernet_elasticity_path, map_location=torch.device(nncf_config.device))
+        compression_state = torch.load(
+            supernet_elasticity_path, map_location=torch.device(nncf_config.device), weights_only=False
+        )
         model, elasticity_ctrl = resume_compression_from_state(nncf_network, compression_state)
-        model_weights = torch.load(supernet_weights_path, map_location=torch.device(nncf_config.device))
+        model_weights = torch.load(
+            supernet_weights_path, map_location=torch.device(nncf_config.device), weights_only=False
+        )
         load_state(model, model_weights, is_resume=True)
         elasticity_ctrl.multi_elasticity_handler.activate_maximum_subnet()
         return TrainedSuperNet(elasticity_ctrl, model)

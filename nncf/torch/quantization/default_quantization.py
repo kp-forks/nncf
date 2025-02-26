@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -29,6 +29,8 @@ DEFAULT_PT_QUANT_TRAIT_TO_OP_DICT: Dict[QuantizationTrait, List[PTOperatorMetaty
         operator_metatypes.PTModuleConvTranspose3dMetatype,
         operator_metatypes.PTDepthwiseConv2dSubtype,
         operator_metatypes.PTDepthwiseConv3dSubtype,
+        operator_metatypes.PTModuleDepthwiseConv2dSubtype,
+        operator_metatypes.PTModuleDepthwiseConv3dSubtype,
         operator_metatypes.PTLinearMetatype,
         operator_metatypes.PTModuleLinearMetatype,
         operator_metatypes.PTLayerNormMetatype,

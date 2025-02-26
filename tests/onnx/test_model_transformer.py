@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -22,7 +22,7 @@ from nncf.onnx.graph.model_transformer import ONNXModelTransformer
 from nncf.onnx.graph.nncf_graph_builder import GraphConverter
 from nncf.onnx.graph.onnx_helper import get_tensor
 from nncf.onnx.graph.onnx_helper import get_tensor_value
-from nncf.onnx.graph.transformations.commands import ONNXBiasCorrectionCommand
+from nncf.onnx.graph.transformations.commands import ONNXInitializerUpdateCommand
 from nncf.onnx.graph.transformations.commands import ONNXOutputInsertionCommand
 from nncf.onnx.graph.transformations.commands import ONNXQDQNodeRemovingCommand
 from nncf.onnx.graph.transformations.commands import ONNXQuantizerInsertionCommand
@@ -79,7 +79,7 @@ def test_quantizer_insertion(target_layers, should_raise, quantizer_number):
 
 
 TARGET_LAYERS = ["Conv1", "BN1", "ReLU1"]
-QUANTIZER_SCALES = [np.array(3.0), 13.2 * np.ones((32)), np.array(17.1)]
+QUANTIZER_SCALES = [np.array(3.0), 13.2 * np.ones(32), np.array(17.1)]
 QUANTIZER_ZERO_POINT = [np.array(1, dtype=np.int32), 2 * np.ones((32), dtype=np.int32), np.array(0, dtype=np.int32)]
 QUANTIZER_ONNX_DTYPE = [np.dtype(np.int8), np.dtype(np.int8), np.dtype(np.uint8)]
 QUANTIZER_ONNX_ATTRIBUTES = [{"axis": 0}, {"axis": 0}, {"axis": 0}]
@@ -173,7 +173,7 @@ def test_bias_correction(layers, values, refs):
     for conv_layer, bias_value in zip(layers, values):
         bias_port_id = 2
         target_point = ONNXTargetPoint(TargetType.LAYER, conv_layer, bias_port_id)
-        command = ONNXBiasCorrectionCommand(target_point, bias_value)
+        command = ONNXInitializerUpdateCommand(target_point, bias_value)
         transformation_layout.register(command)
 
     model_transformer = ONNXModelTransformer(model)
@@ -209,6 +209,7 @@ def test_node_removing(target_layers):
     model_transformer = ONNXModelTransformer(quantized_model)
 
     transformed_model = model_transformer.transform(transformation_layout)
+    onnx.checker.check_model(transformed_model)
     compare_nncf_graph(transformed_model, "synthetic/" + "removed_nodes_in_" + model_to_test.path_ref_graph)
 
 

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -8,13 +8,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 import contextlib
 import numbers
 from abc import ABC
 from abc import abstractmethod
+from collections import defaultdict
 from copy import deepcopy
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple, Union
+from typing import Any, Callable, Dict, List, Tuple, TypeVar, Union
 
 import numpy as np
 import onnx
@@ -26,22 +28,30 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
 
+import nncf
+from nncf.common.graph.transformations.commands import TargetType
 from nncf.config import NNCFConfig
 from nncf.config.extractors import extract_algorithm_names
 from nncf.config.structures import BNAdaptationInitArgs
 from nncf.torch.algo_selector import PT_COMPRESSION_ALGORITHMS
 from nncf.torch.compression_method_api import PTCompressionAlgorithmController
+from nncf.torch.dynamic_graph.context import PreHookId
 from nncf.torch.dynamic_graph.io_handling import FillerInputInfo
+from nncf.torch.dynamic_graph.operation_address import OperationAddress
 from nncf.torch.dynamic_graph.scope import Scope
+from nncf.torch.graph.transformations.commands import PTInsertionCommand
+from nncf.torch.graph.transformations.commands import PTSharedFnInsertionCommand
 from nncf.torch.initialization import PTInitializingDataLoader
 from nncf.torch.initialization import register_default_init_args
+from nncf.torch.layer_utils import StatefullModuleInterface
 from nncf.torch.layers import NNCF_MODULES_MAP
 from nncf.torch.model_creation import create_compressed_model
+from nncf.torch.module_operations import UpdateWeight
 from nncf.torch.nncf_module_replacement import get_original_module_scope_from_nncf_module_scope
 from nncf.torch.nncf_network import NNCFNetwork
 from nncf.torch.utils import get_all_modules_by_type
-from tests.shared.command import Command as BaseCommand
-from tests.shared.helpers import BaseTensorListComparator
+from tests.cross_fw.shared.command import Command as BaseCommand
+from tests.cross_fw.shared.comparator import BaseTensorListComparator
 
 TensorType = Union[torch.Tensor, np.ndarray, numbers.Number]
 
@@ -98,9 +108,8 @@ def create_grouped_conv(
     in_channels, out_channels, kernel_size, groups, weight_init=1, bias_init=0, padding=0, stride=1
 ):
     if in_channels % groups != 0 or out_channels % groups != 0:
-        raise RuntimeError(
-            "Cannot create grouped convolution. Either `in_channels` or `out_channels` are not divisible by `groups`"
-        )
+        msg = "Cannot create grouped convolution. Either `in_channels` or `out_channels` are not divisible by `groups`"
+        raise nncf.ValidationError(msg)
     conv = nn.Conv2d(in_channels, out_channels, kernel_size, groups=groups, padding=padding, stride=stride)
     fill_conv_weight(conv, weight_init)
     fill_bias(conv, bias_init)
@@ -166,6 +175,16 @@ class BasicConvTestModel(nn.Module):
 
 
 class TwoConvTestModel(nn.Module):
+    INPUT_SHAPE = [1, 1, 4, 4]
+    NNCF_CONV_NODES_NAMES = [
+        "TwoConvTestModel/Sequential[features]/Sequential[0]/NNCFConv2d[0]/conv2d_0",
+        "TwoConvTestModel/Sequential[features]/Sequential[1]/NNCFConv2d[0]/conv2d_0",
+    ]
+    CONV_NODES_NAMES = [
+        "TwoConvTestModel/Sequential[features]/Sequential[0]/Conv2d[0]/conv2d_0",
+        "TwoConvTestModel/Sequential[features]/Sequential[1]/Conv2d[0]/conv2d_0",
+    ]
+
     def __init__(self):
         super().__init__()
         self.features = []
@@ -191,6 +210,30 @@ class TwoConvTestModel(nn.Module):
     @property
     def nz_bias_num(self):
         return 2
+
+
+class TwoSharedConvTestModel(nn.Module):
+    INPUT_SHAPE = [1, 1, 4, 4]
+    NNCF_CONV_NODES_NAMES = [
+        "TwoSharedConvTestModel/Sequential[features]/Sequential[0]/NNCFConv2d[0]/conv2d_0",
+        "TwoSharedConvTestModel/Sequential[features]/Sequential[1]/NNCFConv2d[0]/conv2d_0",
+    ]
+    CONV_NODES_NAMES = [
+        "TwoSharedConvTestModel/Sequential[features]/Sequential[0]/Conv2d[0]/conv2d_0",
+        "TwoSharedConvTestModel/Sequential[features]/Sequential[1]/Conv2d[0]/conv2d_0",
+    ]
+
+    def __init__(self):
+        super().__init__()
+        self.features = []
+        self.features.append(nn.Sequential(create_conv(1, 1, 1, -1, -2)))
+        self.features.append(nn.Sequential(create_conv(1, 1, 1, 0, 0)))
+        self.features = nn.Sequential(*self.features)
+
+    def forward(self, x):
+        for _ in range(2):
+            x = self.features(x)
+        return x
 
 
 class LeNet(nn.Module):
@@ -220,6 +263,105 @@ class LeNet(nn.Module):
         for s in size:
             num_features *= s
         return num_features
+
+
+class DummyOpWithState(torch.nn.Module, StatefullModuleInterface):
+    def __init__(self, state: str):
+        super().__init__()
+        self._state = state
+        # Keep dummy param to check state dict
+        self._dummy_param = torch.nn.Parameter(
+            torch.tensor(
+                0.0,
+            )
+        )
+
+    def forward(self, *args):
+        if len(args) == 1:
+            return args[0] + self._dummy_param
+        # To work correctly with
+        # TargetType.PRE_LAYER_OPERATION
+        # TargetType.POST_LAYER_OPERATION
+        args[0].weight + self._dummy_param
+        return None
+
+    def get_config(self):
+        return self._state
+
+    @classmethod
+    def from_config(cls, state: str):
+        return cls(state)
+
+
+def commands_are_equal(
+    command_left: Union[PTInsertionCommand, PTSharedFnInsertionCommand],
+    command_right: Union[PTInsertionCommand, PTSharedFnInsertionCommand],
+    check_priority: bool = True,
+    check_hooks_group_name: bool = True,
+    check_fn_ref=True,
+) -> bool:
+    """
+    Returns True if given commands are equal and False elsewhere.
+
+    :param command_left: The first command.
+    :param command_right: The second command.
+    :param check_priority: Whether to check insertion priority or not.
+    :param check_hooks_group_name: Whether to check hooks group name or not.
+    :param check_fn_ref: Whether to check fn by reference or not.
+    :returns: True if given commands are equal and False elsewhere.
+    """
+    if type(command_right) is not type(command_left):
+        return False
+
+    # Check reference to functions are equal.
+    if check_fn_ref and command_right.fn is not command_left.fn:
+        return False
+    if check_hooks_group_name and command_right.hooks_group_name != command_left.hooks_group_name:
+        return False
+    if check_priority and command_right.priority != command_left.priority:
+        return False
+
+    if isinstance(command_right, PTInsertionCommand):
+        if command_left.target_point != command_right.target_point:
+            return False
+    elif isinstance(command_right, PTSharedFnInsertionCommand):
+        if not all(a == b for a, b in zip(command_left.target_points, command_right.target_points)):
+            return False
+        if (
+            command_right.target_points != command_left.target_points
+            or command_right.op_name != command_left.op_name
+            or command_right.compression_module_type != command_left.compression_module_type
+        ):
+            return False
+    else:
+        raise RuntimeError()
+    return True
+
+
+class SharedConv(nn.Module):
+    INPUT_SIZE = [1, 1, 4, 4]
+
+    def __init__(self):
+        super().__init__()
+        self.conv = create_conv(1, 1, 2, 2)
+
+    def forward(self, x):
+        a = self.conv(x)
+        b = self.conv(x + 1)
+        return a + b
+
+
+class SharedCustomConv(nn.Module):
+    INPUT_SIZE = [1, 1, 4, 4]
+
+    def __init__(self):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones((1, 1, 2, 2)))
+
+    def forward(self, x):
+        a = F.conv2d(x, self.weight)
+        b = F.conv2d(x + 1, self.weight)
+        return a + b
 
 
 def get_empty_config(
@@ -255,7 +397,8 @@ class PTTensorListComparator(BaseTensorListComparator):
             return tensor.cpu().detach().numpy()
         if isinstance(tensor, (np.ndarray, numbers.Number)):
             return tensor
-        raise Exception(f"Tensor must be np.ndarray or torch.Tensor, not {type(tensor)}")
+        msg = f"Tensor must be np.ndarray or torch.Tensor, not {type(tensor)}"
+        raise Exception(msg)
 
 
 def create_compressed_model_and_algo_for_test(
@@ -325,6 +468,32 @@ class MockModel(nn.Module):
         return None
 
 
+class EmptyModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, *input_, **kwargs):
+        return None
+
+
+class ModelWithReloadedForward(nn.Module):
+    """
+    Model accepts tensor or a dict in format
+    {"tensor": input_tensor}
+    """
+
+    INPUT_SHAPE = [1, 1]
+
+    def __init__(self):
+        super().__init__()
+        self.linear = nn.Linear(1, 1)
+
+    def forward(self, x):
+        if isinstance(x, dict):
+            self.forward(x["tensor"])
+        return self.linear(x)
+
+
 def check_correct_nncf_modules_replacement(
     model: torch.nn.Module, compressed_model: NNCFNetwork
 ) -> Tuple[Dict[Scope, Module], Dict[Scope, Module]]:
@@ -338,7 +507,7 @@ def check_correct_nncf_modules_replacement(
     original_modules = get_all_modules_by_type(model, list(NNCF_MODULES_MAP.values()))
     nncf_modules = get_all_modules_by_type(compressed_model, list(NNCF_MODULES_MAP.keys()))
     assert len(original_modules) == len(nncf_modules)
-    for nncf_scope in nncf_modules.keys():
+    for nncf_scope in nncf_modules:
         original_scope = get_original_module_scope_from_nncf_module_scope(nncf_scope)
         assert original_scope in original_modules
     return original_modules, nncf_modules
@@ -497,3 +666,110 @@ def load_exported_onnx_version(
     compression_ctrl.export_model(str(onnx_checkpoint_path), save_format=save_format)
     model_proto = onnx.load_model(str(onnx_checkpoint_path))
     return model_proto
+
+
+HookType = TypeVar("HookType")
+
+
+class HookChecker:
+    """
+    Class to check pre/post hooks and pre ops are placed correctly.
+    Supports check for one wrapped NNCFModule for now.
+    """
+
+    def __init__(self, target_model: torch.nn.Module, nncf_module_attr_name: str):
+        """
+        :param nncf_module_attr_name: name of the nncf module attribute name in target model.
+        """
+        self._nncf_module_attr_name = nncf_module_attr_name
+        self._target_model = target_model
+        self._ref_hooks = defaultdict(dict)
+
+    def add_ref(
+        self,
+        ref_hooks: List[callable],
+        target_type: TargetType,
+        target_node_name: str,
+        input_port_id: int,
+    ) -> None:
+        """
+        Adds references hooks.
+        """
+        op_address = self._convert_to_op_address(
+            target_type, target_node_name, input_port_id, self._target_model.nncf.replace_modules
+        )
+        self._ref_hooks[target_type].update({op_address: ref_hooks})
+
+    def _convert_to_op_address(
+        self, target_type: TargetType, target_node_name: str, input_port_id: int, replace_modules: bool
+    ) -> Any:
+        address_map = self._target_model.nncf.get_node_to_op_address_mapping()
+        address = address_map[target_node_name]
+        if replace_modules:
+            if target_type == TargetType.OPERATOR_PRE_HOOK:
+                address = PreHookId(address, input_port_id)
+            elif target_type in [
+                TargetType.OPERATION_WITH_WEIGHTS,
+                TargetType.PRE_LAYER_OPERATION,
+                TargetType.POST_LAYER_OPERATION,
+            ]:
+                address = getattr(self._target_model, self._nncf_module_attr_name)
+        else:
+            if target_type in [TargetType.OPERATOR_PRE_HOOK, TargetType.OPERATION_WITH_WEIGHTS]:
+                address = PreHookId(address, input_port_id)
+            elif target_type in [
+                TargetType.PRE_LAYER_OPERATION,
+                TargetType.POST_LAYER_OPERATION,
+            ]:
+                address = getattr(self._target_model, self._nncf_module_attr_name)
+        return address
+
+    def check_with_reference(self):
+        """
+        Check hooks in the target model and reference hooks are matching.
+        """
+        self._check_weight_update_hooks(self._ref_hooks[TargetType.OPERATION_WITH_WEIGHTS])
+
+        target_module = getattr(self._target_model, self._nncf_module_attr_name)
+        if target_module in self._ref_hooks[TargetType.PRE_LAYER_OPERATION]:
+            hooks = target_module.pre_ops
+            self._check_pre_post_op_hooks(hooks, self._ref_hooks[TargetType.PRE_LAYER_OPERATION][target_module])
+        if target_module in self._ref_hooks[TargetType.POST_LAYER_OPERATION]:
+            hooks = target_module.post_ops
+            self._check_pre_post_op_hooks(hooks, self._ref_hooks[TargetType.POST_LAYER_OPERATION][target_module])
+
+        hooks = self._target_model.nncf._compressed_context._pre_hooks
+        self._check_pre_post_hooks(hooks, self._ref_hooks[TargetType.OPERATOR_PRE_HOOK])
+        hooks = self._target_model.nncf._compressed_context._post_hooks
+        self._check_pre_post_hooks(hooks, self._ref_hooks[TargetType.OPERATOR_POST_HOOK])
+
+    def clear(self):
+        """
+        Removes all recorded references.
+        """
+        self._ref_hooks.clear()
+
+    @staticmethod
+    def _check_weight_update_hooks(ref_hooks: Dict[torch.nn.Module, List[HookType]]):
+        for target_module, ref_hooks_per_module in ref_hooks.items():
+            assert len(target_module.pre_ops) == len(ref_hooks_per_module)
+            for actual_op, ref_op in zip(target_module.pre_ops.values(), ref_hooks_per_module):
+                assert isinstance(actual_op, UpdateWeight)
+                assert actual_op.op is ref_op
+
+    @staticmethod
+    def _check_pre_post_op_hooks(hooks: List[torch.ModuleDict], ref_hooks: List[HookType]):
+        assert len(hooks) == len(ref_hooks)
+        for actual_hook, ref_hook in zip(hooks.values(), ref_hooks):
+            assert actual_hook is ref_hook
+
+    @staticmethod
+    def _check_pre_post_hooks(
+        hooks: Dict[OperationAddress, Dict[Any, HookType]], ref_hooks: Dict[OperationAddress, List[HookType]]
+    ):
+        assert len(hooks) == len(ref_hooks)
+        for op_address, ref_hooks in ref_hooks.items():
+            actual_hooks = hooks[op_address].values()
+            assert len(actual_hooks) == len(ref_hooks)
+            for actual_hook, ref_hook in zip(actual_hooks, ref_hooks):
+                assert actual_hook is ref_hook

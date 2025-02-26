@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -11,16 +11,36 @@
 
 from abc import ABC
 from abc import abstractmethod
+from functools import partial
+from typing import Callable, Optional, Tuple
 
 import numpy as np
 import openvino.runtime as ov
-from openvino.runtime import opset9 as opset
-from openvino.runtime import opset12
-from openvino.runtime import opset13
+from openvino.runtime import opset13 as opset
 
 from nncf.common.utils.registry import Registry
+from tests.torch.test_models.inceptionv3 import inception_v3
+from tests.torch.test_models.mobilenet import mobilenet_v2
+from tests.torch.test_models.mobilenet_v3 import mobilenet_v3_small
+from tests.torch.test_models.resnet import ResNet18
+from tests.torch.test_models.ssd_mobilenet import ssd_mobilenet
+from tests.torch.test_models.ssd_vgg import ssd_vgg300
+from tests.torch.test_models.swin import SwinTransformerBlock
 
 SYNTHETIC_MODELS = Registry("OV_SYNTHETIC_MODELS")
+
+
+def get_torch_model_info(model_name: str) -> Tuple[Callable, Tuple[int]]:
+    models = {
+        "mobilenet-v2": (mobilenet_v2, (1, 3, 224, 224)),
+        "mobilenet-v3-small": (mobilenet_v3_small, (1, 3, 224, 224)),
+        "resnet-18": (ResNet18, (1, 3, 224, 224)),
+        "inception-v3": (inception_v3, (1, 3, 224, 224)),
+        "ssd-vgg-300": (ssd_vgg300, (1, 3, 300, 300)),
+        "ssd-mobilenet": (ssd_mobilenet, (1, 3, 300, 300)),
+        "swin-block": (partial(SwinTransformerBlock, dim=8, input_resolution=[4, 4], num_heads=2), (1, 16, 8)),
+    }
+    return models[model_name]
 
 
 class OVReferenceModel(ABC):
@@ -202,12 +222,14 @@ class QuantizedModel(OVReferenceModel):
 class WeightsModel(OVReferenceModel):
     def _create_ov_model(self):
         input_1 = opset.parameter([1, 3, 5, 5], name="Input_1")
-        kernel = self._rng.random((3, 3, 1, 1)).astype(np.float32)
+        kernel_data = self._rng.random((3, 3, 1, 1)).astype(np.float32)
+        kernel = opset.constant(kernel_data, dtype=np.float32, name="conv_weights_0")
         strides = [1, 1]
         pads = [0, 0]
         dilations = [1, 1]
         conv = opset.convolution(input_1, kernel, strides, pads, pads, dilations, name="Conv")
-        kernel_2 = self._rng.random((3, 3, 1, 1)).astype(np.float32)
+        kernel_data_2 = self._rng.random((3, 3, 1, 1)).astype(np.float32)
+        kernel_2 = opset.constant(kernel_data_2, dtype=np.float32, name="conv_weights_1")
         output_shape = [1, 1]
         conv_tr = opset.convolution_backprop_data(
             conv, kernel_2, output_shape, strides, pads, pads, dilations, name="Conv_backprop"
@@ -260,21 +282,21 @@ class ScaleShiftReluModel(OVReferenceModel):
 
 
 class FPModel(OVReferenceModel):
-    def __init__(self, const_dtype="FP32", input_dtype="FP32"):
-        self.const_dtype = np.float32 if const_dtype == "FP32" else np.float16
-        self.input_dtype = np.float32 if input_dtype == "FP32" else np.float16
+    def __init__(self, const_dtype: ov.Type = ov.Type.f32, input_dtype: ov.Type = ov.Type.f32):
+        self.const_dtype = const_dtype
+        self.input_dtype = input_dtype
         super().__init__()
 
     def _create_ov_model(self):
         input_shape = [1, 3, 4, 2]
         input_1 = opset.parameter(input_shape, name="Input", dtype=self.input_dtype)
-        data = self._rng.random((1, 3, 4, 5)).astype(self.const_dtype)
+        data = opset.constant(value=self._rng.random((1, 3, 4, 5)), dtype=self.const_dtype, name="MatMul_const")
         if self.const_dtype != self.input_dtype:
-            data = opset.convert(data, self.input_dtype)
+            data = opset.convert(data, self.input_dtype.to_string())
         matmul = opset.matmul(input_1, data, transpose_a=True, transpose_b=False, name="MatMul")
-        bias = self._rng.random((1, 3, 1, 1)).astype(self.const_dtype)
+        bias = opset.constant(value=self._rng.random((1, 3, 1, 1)), dtype=self.const_dtype, name="MatMul_bias")
         if self.const_dtype != self.input_dtype:
-            bias = opset.convert(bias, self.input_dtype)
+            bias = opset.convert(bias, self.input_dtype.to_string())
         add = opset.add(matmul, bias, name="Add")
         result = opset.result(add, name="Result_Add")
         result.get_output_tensor(0).set_names(set(["Result_Add"]))
@@ -460,15 +482,15 @@ class LSTMSequenceModel(OVReferenceModel):
         initial_cell_state = opset.parameter([1, 1, 128], name="initial_cell_state")
         seq_len = opset.constant(np.array([2]), dtype=np.int32)
 
-        W = opset.constant(np.zeros(([1, 512, 16])), dtype=np.float32)
-        R = opset.constant(np.zeros(([1, 512, 128])), dtype=np.float32)
-        B = opset.constant(np.zeros(([1, 512])), dtype=np.float32)
+        W = opset.constant(np.zeros([1, 512, 16]), dtype=np.float32)
+        R = opset.constant(np.zeros([1, 512, 128]), dtype=np.float32)
+        B = opset.constant(np.zeros([1, 512]), dtype=np.float32)
 
         lstm = opset.lstm_sequence(
             x, initial_hidden_state, initial_cell_state, seq_len, W, R, B, 128, "FORWARD", name="LSTMSequence"
         )
         data = self._rng.random((1, 1, 128, 3)).astype(np.float32)
-        matmul = opset.matmul(lstm.output(0), data, transpose_a=False, transpose_b=False, name="MatMul")
+        matmul = opset.matmul(lstm.output(1), data, transpose_a=False, transpose_b=False, name="MatMul")
 
         result = opset.result(matmul, name="Result")
         result.get_output_tensor(0).set_names(set(["Result"]))
@@ -485,9 +507,9 @@ class GRUSequenceModel(OVReferenceModel):
         seq_len = opset.constant(np.array([1, 2, 3]), dtype=np.int32)
 
         scale_factor = 4 if linear_before_reset else 3
-        W = opset.constant(np.zeros(([1, 3 * hidden_size, 16])), dtype=np.float32)
-        R = opset.constant(np.zeros(([1, 3 * hidden_size, hidden_size])), dtype=np.float32)
-        B = opset.constant(np.zeros(([1, scale_factor * hidden_size])), dtype=np.float32)
+        W = opset.constant(np.zeros([1, 3 * hidden_size, 16]), dtype=np.float32)
+        R = opset.constant(np.zeros([1, 3 * hidden_size, hidden_size]), dtype=np.float32)
+        B = opset.constant(np.zeros([1, scale_factor * hidden_size]), dtype=np.float32)
 
         gru = opset.gru_sequence(
             x,
@@ -579,27 +601,33 @@ class SplitConcatModel(OVReferenceModel):
 
 @SYNTHETIC_MODELS.register()
 class IntegerModel(OVReferenceModel):
-    def _create_ov_model(self):
-        input_1 = opset.parameter([1, 7, 1], name="Input")
+    def _create_ov_model(self, dim1=1, dim2=7, dim3=6, max_input_value=2, add_batch_dimension=False):
+        input_1 = opset.parameter([dim1, dim2, dim1], name="Input")
         convert_1 = opset.convert(input_1, destination_type="i64", name="Convert_1")
 
-        gather_1 = opset.gather(convert_1, 2, axis=0, batch_dims=0)
+        gather_1 = opset.gather(convert_1, 0, axis=0, batch_dims=0)
         gather_1.set_friendly_name("Gather_1")
 
-        gather_2_data = opset.constant(self._rng.random((3, 6)), dtype=np.float32, name="gather_2_data")
+        gather_2_data = opset.constant(
+            self._rng.random((max_input_value + 1, dim3)), dtype=np.float32, name="gather_2_data"
+        )
         gather_2 = opset.gather(gather_2_data, gather_1, axis=0, batch_dims=0)
         gather_2.set_friendly_name("Gather_2")
 
         gather_3 = opset.gather(gather_2, 2, axis=0, batch_dims=0)
+        if add_batch_dimension:
+            gather_3 = opset.unsqueeze(gather_3, 0)
         gather_3.set_friendly_name("Gather_3")
 
-        matmul_1_data = opset.constant(self._rng.random((6, 6)), dtype=np.float32, name="matmul_1_data")
+        matmul_1_data = opset.constant(self._rng.random((dim3, dim3)), dtype=np.float32, name="matmul_1_data")
         matmul_1 = opset.matmul(gather_3, matmul_1_data, transpose_a=False, transpose_b=True, name="MatMul_1")
 
         gather_4 = opset.gather(input_1, 0, axis=2, batch_dims=0)
+        if add_batch_dimension:
+            gather_4 = opset.unsqueeze(gather_4, 0)
         gather_4.set_friendly_name("Gather_4")
 
-        matmul_2_data = opset.constant(self._rng.random((6, 7)), dtype=np.float32, name="matmul_2_data")
+        matmul_2_data = opset.constant(self._rng.random((dim3, dim2)), dtype=np.float32, name="matmul_2_data")
         matmul_2 = opset.matmul(gather_4, matmul_2_data, transpose_a=False, transpose_b=True, name="MatMul_2")
         add_1 = opset.add(matmul_1, matmul_2, name="Add_1")
 
@@ -705,7 +733,7 @@ class GroupNormalizationModel(OVReferenceModel):
 
         scale = self._rng.random(channels).astype(np.float32)
         bias = self._rng.random(channels).astype(np.float32)
-        group_norm = opset12.group_normalization(conv_add, scale, bias, num_groups=channels, epsilon=1e-5)
+        group_norm = opset.group_normalization(conv_add, scale, bias, num_groups=channels, epsilon=1e-5)
 
         relu = opset.relu(group_norm, name="Relu")
 
@@ -770,12 +798,12 @@ class SequentialMatmulModel(OVReferenceModel):
     """
 
     def _create_ov_model(self):
-        input_node = opset.parameter([3, 3], name="Input_1")
-        main_values = [100, 1000, 10000, 10, 1]
+        input_node = opset.parameter([1, 4, 4], name="Input_1")
+        main_values = [10000, 1000, 1, 10, 10000]
 
         last_node = input_node
         for i, main_value in enumerate(main_values):
-            weights_data = np.arange(0, 9).reshape(3, 3)
+            weights_data = np.arange(0, 16).reshape(4, 4)
             weights_data[-1, -1] = main_value
             current_weights = opset.constant(weights_data, dtype=np.float32, name=f"weights_{i}")
             current_node = opset.matmul(
@@ -784,6 +812,27 @@ class SequentialMatmulModel(OVReferenceModel):
             last_node = current_node
 
         result = opset.result(last_node, name="Result")
+        result.get_output_tensor(0).set_names(set(["Result"]))
+        model = ov.Model([result], [input_node])
+        return model
+
+
+class IdentityMatmul(OVReferenceModel):
+    def _create_ov_model(self, weights_dtype: Optional[ov.Type] = None, activation_dtype: Optional[ov.Type] = None):
+        """
+        :param: weights_dtype: precision of weights
+        :param: activation_dtype: precision of activations
+        """
+        weights_dtype = ov.Type.f32 if weights_dtype is None else weights_dtype
+        activation_dtype = ov.Type.f32 if activation_dtype is None else activation_dtype
+
+        input_node = opset.parameter([1, 3, 3], dtype=activation_dtype, name="Input_1")
+        weights_data = np.eye(3) * 255
+        current_weights = opset.constant(weights_data, dtype=weights_dtype, name="weights")
+        if weights_dtype != activation_dtype:
+            current_weights = opset.convert(current_weights, activation_dtype, name="weights/convert")
+        matmul_node = opset.matmul(input_node, current_weights, transpose_a=False, transpose_b=True, name="MatMul")
+        result = opset.result(matmul_node, name="Result")
         result.get_output_tensor(0).set_names(set(["Result"]))
         model = ov.Model([result], [input_node])
         return model
@@ -828,13 +877,320 @@ class GatherAndMatmulShareData(OVReferenceModel):
 
 class ScaledDotProductAttentionModel(OVReferenceModel):
     def _create_ov_model(self):
-        query = opset.parameter([1, 1, 1, 64], name="Input_1")
-        key = opset.parameter([1, 1, 1, 64], name="Input_2")
-        value = opset.parameter([1, 1, 1, 64], name="Input_3")
-        attn_mask = opset.parameter([1, 1, 1, 1], name="Input_4")
+        input_ = opset.parameter([1, 1, 1, 64], name="Input_1")
+        attn_mask = opset.parameter([1, 1, 1, 1], name="Input_2")
+        x = opset.reshape(input_, [64], False)
+        x = opset.reshape(x, [1, 1, 1, 64], False)
 
-        attn = opset13.scaled_dot_product_attention(query, key, value, attn_mask)
+        # Parallel edges are not supported by PTQ for now.
+        # Ref 148498
+        inputs = []
+        for _ in range(3):
+            x_ = opset.reshape(x, [64], False)
+            x_ = opset.reshape(x_, [1, 1, 1, 64], False)
+            inputs.append(x_)
+
+        attn = opset.scaled_dot_product_attention(*inputs, attn_mask)
         result = opset.result(attn, name="Result")
         result.get_output_tensor(0).set_names(set(["Result"]))
-        model = ov.Model([result], [query, key, value, attn_mask])
+        model = ov.Model([result], [input_, attn_mask])
+        return model
+
+
+class LinearQuantizedModel(OVReferenceModel):
+    @staticmethod
+    def _create_fq_node(parent_node, name):
+        return opset.fake_quantize(
+            parent_node, np.float32(-1), np.float32(1), np.float32(-1), np.float32(1), 256, name=name
+        )
+
+    def _create_ov_model(self):
+        inputs = opset.parameter((1, 3, 4, 2), name="Input")
+
+        w = self._rng.random((2, 5), dtype=np.float32)
+        x = opset.matmul(
+            self._create_fq_node(inputs, "FQ_Inputs"),
+            self._create_fq_node(w, "FQ_Weights_0"),
+            transpose_a=False,
+            transpose_b=False,
+            name="MatMul_0",
+        )
+        x = opset.relu(x, name="ReLu_0")
+
+        w = self._rng.random((5, 2), dtype=np.float32)
+        x = opset.matmul(
+            self._create_fq_node(x, "FQ_ReLu_0"),
+            self._create_fq_node(w, "FQ_Weights_1"),
+            transpose_a=False,
+            transpose_b=False,
+            name="MatMul_1",
+        )
+        x = opset.relu(x, name="ReLu_1")
+
+        x = opset.result(x, name="Result")
+        x.get_output_tensor(0).set_names(set(["Result"]))
+
+        model = ov.Model([x], [inputs])
+        return model
+
+
+class AWQMatmulModel(OVReferenceModel):
+    """
+    Model for testing AWQ algorithm. Contains MatMul->Multiply->MatMul pattern.
+    """
+
+    @staticmethod
+    def get_weights(weights_data, is_int8, name):
+        if not is_int8:
+            return opset.constant(weights_data, dtype=np.float32, name=name)
+        else:
+            qw = opset.constant(weights_data, dtype=np.uint8, name="qw_" + name)
+            qw = opset.convert(qw, destination_type=np.float32)
+
+            zp = opset.constant(np.array([2**7]), dtype=np.uint8, name="zp_" + name)
+            zp = opset.convert(zp, destination_type=np.float32)
+
+            scale = opset.constant(
+                np.ones((weights_data.shape[0], 1), dtype=np.float32), dtype=np.float32, name="scale_" + name
+            )
+            return (qw - zp) * scale
+
+    def _create_ov_model(self, n_extra_dims: int = 1, is_int8=False):
+        input_node = opset.parameter([1] * n_extra_dims + [-1, 8], name="Input_1")
+
+        weights_data1 = 0.01 * np.arange(0, 64).reshape(8, 8) + 0.05
+        weights1 = self.get_weights(weights_data1, is_int8, name="weights_1")
+        node1 = opset.matmul(input_node, weights1, transpose_a=False, transpose_b=True, name="MatMul_1")
+
+        weights_data2 = 0.01 * np.arange(0, 64).reshape(8, 8) + 0.05
+        weights2 = self.get_weights(weights_data2, is_int8, name="weights_2")
+        node2 = opset.matmul(input_node, weights2, transpose_a=False, transpose_b=True, name="MatMul_2")
+
+        node_multiply = opset.multiply(node1, node2, name="Multiply")
+
+        weights_data3 = 0.01 * np.arange(0, 64).reshape(8, 8) + 0.05
+        weights3 = self.get_weights(weights_data3, is_int8, name="weights_3")
+        node3 = opset.matmul(node_multiply, weights3, transpose_a=False, transpose_b=True, name="MatMul_3")
+
+        weights_data4 = 0.01 * np.arange(0, 64).reshape(8, 8) + 0.05
+        weights4 = self.get_weights(weights_data4, is_int8, name="weights_4")
+        node4 = opset.matmul(node3, weights4, transpose_a=False, transpose_b=True, name="MatMul_4")
+
+        weights_data5 = 0.01 * np.arange(0, 64).reshape(8, 8) + 0.05
+        weights5 = self.get_weights(weights_data5, is_int8, name="weights_5")
+        node5 = opset.matmul(node3, weights5, transpose_a=False, transpose_b=True, name="MatMul_5")
+
+        node_multiply_2 = opset.multiply(node4, node5, name="Multiply_2")
+
+        weights_data6 = 0.01 * np.arange(0, 64).reshape(8, 8) + 0.05
+        weights6 = self.get_weights(weights_data6, is_int8, name="weights_6")
+        node6 = opset.matmul(node_multiply_2, weights6, transpose_a=False, transpose_b=True, name="MatMul_6")
+
+        result = opset.result(node6, name="Result")
+        result.get_output_tensor(0).set_names(set(["Result"]))
+        model = ov.Model([result], [input_node])
+        return model
+
+
+class AWQActMatmulModel(OVReferenceModel):
+    """
+    Model for testing AWQ algorithm. Contains MatMul->Multiply->MatMul pattern.
+    """
+
+    def _create_ov_model(self, is_int8=False, with_multiply=False, n_layers=8):
+        input_node = opset.parameter([1, 8, 8], name="Input_1")
+        weights_data = np.arange(0, 64).reshape(8, 8) - 32
+        weights = AWQMatmulModel.get_weights(weights_data, is_int8, name="weights_emb")
+        out_node = opset.matmul(input_node, weights, transpose_a=False, transpose_b=True, name="MatMul_emb")
+
+        for i in range(n_layers):
+            weights_data = np.arange(0, 64).reshape(8, 8) - 32
+            weights = AWQMatmulModel.get_weights(weights_data, is_int8, name=f"weights_1_{i}")
+            mm1 = opset.matmul(out_node, weights, transpose_a=False, transpose_b=True, name=f"MatMul_1_{i}")
+            node1 = opset.relu(mm1, name=f"ReLU_{i}")
+
+            if with_multiply:
+                weights_data = np.arange(0, 64).reshape(8, 8) - 32
+                weights = AWQMatmulModel.get_weights(weights_data, is_int8, name=f"weights_2_{i}")
+                mm2 = opset.matmul(out_node, weights, transpose_a=False, transpose_b=True, name=f"MatMul_2_{i}")
+
+                alpha = np.array([1.5], dtype=np.float32)
+                alpha = opset.constant(alpha, dtype=np.float32)
+                lambda_value = np.array([1.5], dtype=np.float32)
+                lambda_value = opset.constant(lambda_value, dtype=np.float32)
+                node2 = opset.selu(mm2, alpha, lambda_value, name=f"SeLU_{i}")
+
+                node_multiply = opset.multiply(node1, node2, name=f"Multiply_{i}")
+            else:
+                node_multiply = node1
+
+            out_node = node_multiply
+
+        weights_data = np.arange(0, 64).reshape(8, 8) - 32
+        weights = AWQMatmulModel.get_weights(weights_data, is_int8, name="weights_lm_head")
+        out_node = opset.matmul(out_node, weights, transpose_a=False, transpose_b=True, name="MatMul_lm_head")
+
+        result = opset.result(out_node, name="Result")
+        result.get_output_tensor(0).set_names(set(["Result"]))
+        model = ov.Model([result], [input_node])
+        return model
+
+
+class DuplicatedNamesModel(OVReferenceModel):
+    """
+    Model with duplicated node names (friendly_name field).
+    """
+
+    def _create_ov_model(self):
+        main_shape = [1, 2]
+        input_1 = opset.parameter(main_shape, name="Parameter")
+
+        add_1_data = self._rng.random(main_shape).astype(np.float32)
+        add_1 = opset.add(input_1, add_1_data, name="Duplicate")
+
+        matmul_1_data = self._rng.random(main_shape).astype(np.float32)
+        matmul_1 = opset.matmul(add_1, matmul_1_data, transpose_a=False, transpose_b=True, name="Duplicate")
+
+        result = opset.result(matmul_1, name="Result")
+        model = ov.Model([result], [input_1])
+        return model
+
+
+class ModelNamedConsts(OVReferenceModel):
+    """
+    Model with named constant nodes (friendly_name field).
+    """
+
+    def _create_ov_model(self):
+        main_shape = [1, 2]
+        input_1 = opset.parameter(main_shape, name="Parameter")
+
+        add_1_data = self._rng.random(main_shape).astype(np.float32)
+        add_1_const = opset.constant(add_1_data, name="Constant_16")
+        add_1 = opset.add(input_1, add_1_const, name="Add_1")
+
+        matmul_1_data = self._rng.random(main_shape).astype(np.float32)
+        matmul_1_const = opset.constant(matmul_1_data, name="Constant_1")
+        matmul_1 = opset.matmul(add_1, matmul_1_const, transpose_a=False, transpose_b=True, name="MatMul_1")
+
+        result = opset.result(matmul_1, name="Result")
+        model = ov.Model([result], [input_1])
+        return model
+
+
+class StatefulModel(OVReferenceModel):
+    """
+    Stateful model for testing.
+    Borrowed from https://github.com/openvinotoolkit/openvino/blob/0c552b7b152c341b5e545d131bd032fcb3cb6b86/src/bindings/python/tests/utils/helpers.py#L212
+    """
+
+    def __init__(self, stateful=True):
+        super().__init__(stateful=stateful)
+
+    def _create_ov_model(self, stateful=True):
+        input_shape = [1, 8]
+        data_type = np.float32
+        input_data = opset.parameter(input_shape, name="input_data", dtype=data_type)
+        init_val = opset.constant(np.zeros(input_shape), data_type)
+        if stateful:
+            rv = opset.read_value(init_val, "var_id_667", data_type, input_shape)
+            add = opset.add(rv, input_data, name="MemoryAdd")
+            node = opset.assign(add, "var_id_667")
+            scale_val = opset.constant(np.ones(input_shape), data_type)
+            scale = opset.multiply(add, scale_val, name="Scale")
+            result = opset.result(scale, name="Result")
+            result.get_output_tensor(0).set_names(set(["Result"]))
+            model = ov.Model(results=[result], sinks=[node], parameters=[input_data], name="TestModel")
+        else:
+            bias = opset.constant(np.zeros(input_shape), data_type)
+            add = opset.add(input_data, bias, name="Add")
+            scale_val = opset.constant(np.ones(input_shape), data_type)
+            scale = opset.multiply(add, scale_val, name="Scale")
+            result = opset.result(scale, name="Result")
+            result.get_output_tensor(0).set_names(set(["Result"]))
+            model = ov.Model(results=[result], parameters=[input_data], name="TestModel")
+
+        return model
+
+
+class IfModel_2(OVReferenceModel):
+    def _create_ov_model(self):
+        input_1 = opset.parameter([1, 3, 4, 2], name="Input_1")
+        input_2 = opset.parameter([], dtype=bool, name="Cond_input")
+
+        then_body = ConvNotBiasModel().ov_model
+        else_body = FPModel().ov_model
+
+        if_node = opset.if_op(input_2)
+        if_node.set_then_body(then_body)
+        if_node.set_else_body(else_body)
+        if_node.set_input(input_1.outputs()[0], then_body.get_parameters()[0], else_body.get_parameters()[0])
+        if_node.set_output(then_body.results[0], else_body.results[0])
+        result = opset.result(if_node, name="Result")
+        model = ov.Model([result], [input_1, input_2])
+        return model
+
+
+class PreluModel(OVReferenceModel):
+    def _create_ov_model(self):
+        input = opset.parameter([1, 3, 4, 2], name="Input")
+        prelu = opset.prelu(input, slope=1)
+        result = opset.result(prelu, name="Result")
+        result.get_output_tensor(0).set_names(set(["Result"]))
+        model = ov.Model([result], [input])
+        return model
+
+
+class UnifiedScalesModel(OVReferenceModel):
+    def _create_ov_model(self):
+        input = opset.parameter([1, 3, 4, 2], name="Input")
+        multiply = opset.multiply(input, self._rng.random((1, 2)).astype(np.float32), name="Mul")
+        sin = opset.sin(multiply, name="Sin")
+        cos = opset.cos(multiply, name="Cos")
+        concat = opset.concat([sin, cos], axis=0)
+        kernel = self._rng.random((3, 3, 1, 1)).astype(np.float32)
+        strides = [1, 1]
+        pads = [0, 0]
+        dilations = [1, 1]
+        conv = opset.convolution(concat, kernel, strides, pads, pads, dilations, name="Conv")
+        result = opset.result(conv, name="Result")
+        model = ov.Model([result], [input])
+        return model
+
+
+class RoPEModel(OVReferenceModel):
+    def _create_ov_model(self):
+        position_ids = opset.parameter([1, 10], name="position_ids")
+
+        unsqueeze = opset.unsqueeze(position_ids, 0, name="unsqueeze")
+        convert = opset.convert(unsqueeze, ov.Type.f32, name="convert")
+
+        broadcast_data = self._rng.random((1, 5, 1)).astype(np.float32)
+        broadcast_shape = [1, 5, 1]
+        broadcast = opset.broadcast(broadcast_data, broadcast_shape, name="broadcast")
+
+        matmul = opset.matmul(broadcast, convert, transpose_a=False, transpose_b=False, name="MatMul")
+        transpose = opset.transpose(matmul, [0, 2, 1], name="transpose")
+        concat = opset.concat([transpose], axis=0, name="concat")
+        sin = opset.sin(concat, name="sin")
+        cos = opset.cos(concat, name="cos")
+        sin_result = opset.result(sin, name="sin_result")
+        cos_result = opset.result(cos, name="cos_result")
+
+        model = ov.Model([sin_result, cos_result], [position_ids])
+        return model
+
+
+class MatMul(OVReferenceModel):
+    def _create_ov_model(self):
+        input_node = opset.parameter([1, 4, 8], name="Input")
+
+        weights_data = np.arange(0, 16 * 8, dtype=np.float32).reshape(16, 8)
+        weights_node = opset.constant(weights_data, dtype=np.float32, name="Weights")
+
+        matmul_node = opset.matmul(input_node, weights_node, transpose_a=False, transpose_b=True, name="MatMul")
+
+        result_node = opset.result(matmul_node, name="Result")
+
+        model = ov.Model([result_node], [input_node], name="MLP_Model")
         return model

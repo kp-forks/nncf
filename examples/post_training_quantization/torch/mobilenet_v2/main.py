@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -9,34 +9,33 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import re
 import subprocess
 from functools import partial
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import List, Tuple
 
 import numpy as np
 import openvino as ov
 import torch
 from fastdownload import FastDownload
+from rich.progress import track
 from sklearn.metrics import accuracy_score
 from torchvision import datasets
 from torchvision import models
 from torchvision import transforms
 
 import nncf
-from nncf.common.logging.track_progress import track
 
 ROOT = Path(__file__).parent.resolve()
 CHECKPOINT_URL = "https://huggingface.co/alexsu52/mobilenet_v2_imagenette/resolve/main/pytorch_model.bin"
 DATASET_URL = "https://s3.amazonaws.com/fast-ai-imageclas/imagenette2-320.tgz"
-DATASET_PATH = "~/.cache/nncf/datasets"
+DATASET_PATH = Path().home() / ".cache" / "nncf" / "datasets"
 DATASET_CLASSES = 10
 
 
 def download_dataset() -> Path:
-    downloader = FastDownload(base=DATASET_PATH, archive="downloaded", data="extracted")
+    downloader = FastDownload(base=DATASET_PATH.resolve(), archive="downloaded", data="extracted")
     return downloader.get(DATASET_URL)
 
 
@@ -50,7 +49,7 @@ def validate(model: ov.Model, val_loader: torch.utils.data.DataLoader) -> float:
     predictions = []
     references = []
 
-    compiled_model = ov.compile_model(model)
+    compiled_model = ov.compile_model(model, device_name="CPU")
     output = compiled_model.outputs[0]
 
     for images, target in track(val_loader, description="Validating"):
@@ -63,30 +62,33 @@ def validate(model: ov.Model, val_loader: torch.utils.data.DataLoader) -> float:
     return accuracy_score(predictions, references)
 
 
-def run_benchmark(model_path: str, shape: Optional[List[int]] = None, verbose: bool = True) -> float:
-    command = f"benchmark_app -m {model_path} -d CPU -api async -t 15"
-    if shape is not None:
-        command += f' -shape [{",".join(str(x) for x in shape)}]'
-    cmd_output = subprocess.check_output(command, shell=True)  # nosec
-    if verbose:
-        print(*str(cmd_output).split("\\n")[-9:-1], sep="\n")
-    match = re.search(r"Throughput\: (.+?) FPS", str(cmd_output))
+def run_benchmark(model_path: Path, shape: List[int]) -> float:
+    command = [
+        "benchmark_app",
+        "-m", model_path.as_posix(),
+        "-d", "CPU",
+        "-api", "async",
+        "-t", "15",
+        "-shape", str(shape),
+    ]  # fmt: skip
+    cmd_output = subprocess.check_output(command, text=True)  # nosec
+    print(*cmd_output.splitlines()[-8:], sep="\n")
+    match = re.search(r"Throughput\: (.+?) FPS", cmd_output)
     return float(match.group(1))
 
 
-def get_model_size(ir_path: str, m_type: str = "Mb", verbose: bool = True) -> float:
-    xml_size = os.path.getsize(ir_path)
-    bin_size = os.path.getsize(os.path.splitext(ir_path)[0] + ".bin")
+def get_model_size(ir_path: Path, m_type: str = "Mb") -> float:
+    xml_size = ir_path.stat().st_size
+    bin_size = ir_path.with_suffix(".bin").stat().st_size
     for t in ["bytes", "Kb", "Mb"]:
         if m_type == t:
             break
         xml_size /= 1024
         bin_size /= 1024
     model_size = xml_size + bin_size
-    if verbose:
-        print(f"Model graph (xml):   {xml_size:.3f} {m_type}")
-        print(f"Model weights (bin): {bin_size:.3f} {m_type}")
-        print(f"Model size:          {model_size:.3f} {m_type}")
+    print(f"Model graph (xml):   {xml_size:.3f} {m_type}")
+    print(f"Model weights (bin): {bin_size:.3f} {m_type}")
+    print(f"Model size:          {model_size:.3f} {m_type}")
     return model_size
 
 
@@ -97,7 +99,7 @@ dataset_path = download_dataset()
 
 normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 val_dataset = datasets.ImageFolder(
-    root=f"{dataset_path}/val",
+    root=dataset_path / "val",
     transform=transforms.Compose(
         [
             transforms.Resize(256),
@@ -107,7 +109,8 @@ val_dataset = datasets.ImageFolder(
         ]
     ),
 )
-val_data_loader = torch.utils.data.DataLoader(val_dataset)
+batch_size = 128
+val_data_loader = torch.utils.data.DataLoader(val_dataset, batch_size=batch_size)
 
 torch_model = models.mobilenet_v2(num_classes=DATASET_CLASSES)
 torch_model = load_checkpoint(torch_model)
@@ -140,8 +143,10 @@ def transform_fn(data_item: Tuple[torch.Tensor, int], device: torch.device) -> t
 # item and prepare model input data. The quantize method uses a small subset
 # (default: 300 samples) of the calibration dataset.
 
+# Recalculation default subset_size parameter based on batch_size.
+subset_size = 300 // batch_size
 calibration_dataset = nncf.Dataset(val_data_loader, partial(transform_fn, device=device))
-torch_quantized_model = nncf.quantize(torch_model, calibration_dataset)
+torch_quantized_model = nncf.quantize(torch_model, calibration_dataset, subset_size=subset_size)
 
 ###############################################################################
 # Benchmark performance, calculate compression rate and validate accuracy
@@ -150,20 +155,20 @@ dummy_input = torch.randn(1, 3, 224, 224)
 ov_model = ov.convert_model(torch_model.cpu(), example_input=dummy_input)
 ov_quantized_model = ov.convert_model(torch_quantized_model.cpu(), example_input=dummy_input)
 
-fp32_ir_path = f"{ROOT}/mobilenet_v2_fp32.xml"
+fp32_ir_path = ROOT / "mobilenet_v2_fp32.xml"
 ov.save_model(ov_model, fp32_ir_path, compress_to_fp16=False)
 print(f"[1/7] Save FP32 model: {fp32_ir_path}")
-fp32_model_size = get_model_size(fp32_ir_path, verbose=True)
+fp32_model_size = get_model_size(fp32_ir_path)
 
-int8_ir_path = f"{ROOT}/mobilenet_v2_int8.xml"
-ov.save_model(ov_quantized_model, int8_ir_path, compress_to_fp16=False)
+int8_ir_path = ROOT / "mobilenet_v2_int8.xml"
+ov.save_model(ov_quantized_model, int8_ir_path)
 print(f"[2/7] Save INT8 model: {int8_ir_path}")
-int8_model_size = get_model_size(int8_ir_path, verbose=True)
+int8_model_size = get_model_size(int8_ir_path)
 
 print("[3/7] Benchmark FP32 model:")
-fp32_fps = run_benchmark(fp32_ir_path, shape=[1, 3, 224, 224], verbose=True)
+fp32_fps = run_benchmark(fp32_ir_path, shape=[1, 3, 224, 224])
 print("[4/7] Benchmark INT8 model:")
-int8_fps = run_benchmark(int8_ir_path, shape=[1, 3, 224, 224], verbose=True)
+int8_fps = run_benchmark(int8_ir_path, shape=[1, 3, 224, 224])
 
 print("[5/7] Validate OpenVINO FP32 model:")
 fp32_top1 = validate(ov_model, val_data_loader)

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -19,13 +19,9 @@ from os import path as osp
 from pathlib import Path
 from shutil import copyfile
 from typing import Tuple
-from urllib.request import url2pathname
 
-import mlflow
 import torch
 from PIL import Image
-from returns.maybe import Maybe
-from returns.maybe import Nothing
 from torch.utils import data
 from torch.utils.tensorboard import SummaryWriter
 
@@ -34,9 +30,7 @@ from examples.torch.common.distributed import configure_distributed
 from examples.torch.common.example_logger import logger as default_logger
 from examples.torch.common.execution import ExecutionMode
 from examples.torch.common.execution import get_device
-from nncf.common.utils.os import is_linux
 from nncf.config.schemata.defaults import QUANTIZATION_BITS
-from nncf.torch.utils import is_main_process
 
 GENERAL_LOG_FILE_NAME = "output.log"
 NNCF_LOG_FILE_NAME = "nncf_output.log"
@@ -65,11 +59,11 @@ def get_run_name(config: SampleConfig) -> str:
                 weights = algo_dict.get("weights", {})
                 w_bits = weights.get("bits", QUANTIZATION_BITS)
                 if a_bits == w_bits:
-                    retval += "_int{}".format(a_bits)
+                    retval += f"_int{a_bits}"
                 else:
-                    retval += "_a_int{}_w_int{}".format(a_bits, w_bits)
+                    retval += f"_a_int{a_bits}_w_int{w_bits}"
         else:
-            retval += "_{}".format(algo_name)
+            retval += f"_{algo_name}"
     return retval
 
 
@@ -78,52 +72,6 @@ def write_metrics(acc, filename):
     metrics = {"Accuracy": avg}
     with open(filename, "w", encoding="utf8") as outfile:
         json.dump(metrics, outfile)
-
-
-class SafeMLFLow:
-    """Wrapper to encapsulate safe access to mlflow methods without checking for None and with automatic closing"""
-
-    def __init__(self, config):
-        self.is_suitable_mode = "train" in config.mode
-        log_dir = Path(config.log_dir)
-        root_log_dir = log_dir.parent.parent
-        self.safe_call("set_tracking_uri", (root_log_dir / "mlruns").resolve().as_uri())
-
-        self.safe_call("get_experiment_by_name", config.name).or_else_call(
-            lambda: self.safe_call("create_experiment", config.name)
-        )
-
-        self.safe_call("set_experiment", config.name)
-        self.safe_call("start_run")
-
-        def create_symlink_fn(mlflow_active_run: mlflow.ActiveRun):
-            if is_linux():
-                artifact_path = Path(url2pathname(mlflow_active_run.info.artifact_uri.split("file:")[1]))
-                symlink_path = artifact_path / log_dir.name
-                symlink_path.symlink_to(config.log_dir, target_is_directory=True)
-            return Nothing
-
-        self.safe_call("active_run").bind(create_symlink_fn)
-
-    def __del__(self):
-        self.safe_call("end_run")
-
-    def safe_call(self, func: str, *args, **kwargs) -> Maybe:
-        """Calls mlflow method, if it's enabled and safely does nothing in the opposite case"""
-        return Maybe.from_optional(self._get_mlflow()).bind(
-            lambda obj: Maybe.from_value(getattr(obj, func)(*args, **kwargs))
-        )
-
-    def end_run(self):
-        self.safe_call("end_run")
-
-    def _is_enabled(self):
-        return self.is_suitable_mode and is_main_process()
-
-    def _get_mlflow(self):
-        if self._is_enabled():
-            return mlflow
-        return None
 
 
 def configure_device(current_gpu, config: SampleConfig):
@@ -154,14 +102,6 @@ def configure_logging(sample_logger, config):
     nncf_logger.addHandler(nncf_log_file_handler)
 
 
-def log_common_mlflow_params(config):
-    optimizer = config.nncf_config.get("optimizer", {})
-    config.mlflow.safe_call("log_param", "epochs", config.get("epochs", "None"))
-    config.mlflow.safe_call("log_param", "schedule_type", optimizer.get("schedule_type", "None"))
-    config.mlflow.safe_call("log_param", "lr", optimizer.get("base_lr", "None"))
-    config.mlflow.safe_call("set_tag", "Log Dir Path", config.log_dir)
-
-
 def is_on_first_rank(config):
     return not config.multiprocessing_distributed or (
         config.multiprocessing_distributed and config.rank % config.ngpus_per_node == 0
@@ -181,7 +121,7 @@ def create_code_snapshot(root, dst_path, extensions=(".py", ".json", ".cpp", ".c
 def print_args(config, logger=default_logger):
     logger.info("\nConfiguration parameters:")
     for arg in sorted(config):
-        logger.info("{: <27s}: {}".format(arg, config.get(arg)))
+        logger.info(f"{arg: <27s}: {config.get(arg)}")
     logger.info("\n")
 
 
@@ -226,9 +166,7 @@ def is_staged_quantization(config):
     if isinstance(compression_config, list):
         compression_config = compression_config[0]
     algo_type = compression_config.get("algorithm")
-    if algo_type is not None and algo_type == "binarization":
-        return True
-    if algo_type == "quantization" and compression_config.get("params", {}):
+    if algo_type is not None and algo_type == "quantization" and compression_config.get("params", {}):
         return True
     return False
 

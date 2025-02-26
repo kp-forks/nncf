@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -175,11 +175,10 @@ class BootstrapNASScheduler(BaseCompressionScheduler):
         super().epoch_step(next_epoch)
         self._lr_scheduler.epoch_step(next_epoch)
         stage_desc, stage_desc_idx = self.get_current_stage_desc()
-        if stage_desc is not None:
-            if stage_desc_idx != self.current_stage_idx:
-                self._lr_scheduler.stage_step(stage_desc)
-                self._training_ctrl.set_stage(stage_desc)
-                self.current_stage_idx = stage_desc_idx
+        if stage_desc is not None and stage_desc_idx != self.current_stage_idx:
+            self._lr_scheduler.stage_step(stage_desc)
+            self._training_ctrl.set_stage(stage_desc)
+            self.current_stage_idx = stage_desc_idx
 
     def is_final_stage(self) -> bool:
         """
@@ -192,12 +191,10 @@ class BootstrapNASScheduler(BaseCompressionScheduler):
         :return: current stage descriptor and its index in the list of all descriptors
         """
         partial_epochs = 0
-        stage_desc_idx = 0
-        for stage_desc in self.list_stage_descriptors:
+        for stage_desc_idx, stage_desc in enumerate(self.list_stage_descriptors):
             partial_epochs += stage_desc.epochs
             if self.current_epoch < partial_epochs:
                 return stage_desc, stage_desc_idx
-            stage_desc_idx += 1
         return None, -1
 
     def get_total_training_epochs(self) -> int:
@@ -244,13 +241,14 @@ class BootstrapNASScheduler(BaseCompressionScheduler):
             stages_covered = []
             for train_dim in desc.train_dims:
                 if train_dim not in available_elasticity_dims:
-                    raise ValueError(
+                    msg = (
                         f"Invalid training elasticity dimension {train_dim} in the scheduler.\n"
                         f"The elasticity for this dimension is not enabled.\n"
                         f"It can be enabled by specifying `available_elasticity_dims` param in the `elasticity` "
                         f"section of config.\n"
                         f"List of currently available dimensions: {[dim.value for dim in available_elasticity_dims]}"
                     )
+                    raise ValueError(msg)
                 dim_idx = progressivity_of_elasticity.index(train_dim)
                 if dim_idx not in stages_covered:
                     stages_covered.append(dim_idx)
@@ -259,15 +257,15 @@ class BootstrapNASScheduler(BaseCompressionScheduler):
                 if dim_idx < low_priority_dim_idx:
                     low_priority_dim_idx = dim_idx
             if high_priority_dim_idx < last_stage or low_priority_dim_idx > first_stage:
-                raise ValueError(
-                    f"stage {progressivity_of_elasticity[high_priority_dim_idx]} violates progressivity of elasticity"
-                )
+                msg = f"stage {progressivity_of_elasticity[high_priority_dim_idx]} violates progressivity of elasticity"
+                raise ValueError(msg)
             for i in range(low_priority_dim_idx, high_priority_dim_idx):
                 if i not in stages_covered and progressivity_of_elasticity[i] in available_elasticity_dims:
-                    raise ValueError(
+                    msg = (
                         f"Missed to call {progressivity_of_elasticity[i]} in {desc.train_dims} which violates "
                         f"progressivity of elasticity {progressivity_of_elasticity}"
                     )
+                    raise ValueError(msg)
             last_stage = high_priority_dim_idx
             first_stage = low_priority_dim_idx
 
@@ -275,9 +273,8 @@ class BootstrapNASScheduler(BaseCompressionScheduler):
         for desc in self._list_stage_descriptors:
             # Check if global learning rate has been set
             if desc.init_lr is not None and bool(self._training_ctrl.lr_schedule_config):
-                raise ValueError(
-                    f"Global learning rate scheduler is in use. Cannot set stage learning rate: {desc.init_lr}"
-                )
+                msg = f"Global learning rate scheduler is in use. Cannot set stage learning rate: {desc.init_lr}"
+                raise ValueError(msg)
             # Check if stage learning rate has been set
             if desc.init_lr is None and not bool(self._training_ctrl.lr_schedule_config):
                 nncf_logger.warning(

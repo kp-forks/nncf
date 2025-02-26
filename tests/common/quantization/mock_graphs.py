@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -10,17 +10,17 @@
 # limitations under the License.
 
 import random
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from unittest.mock import MagicMock
 
 import networkx as nx
 
 from nncf.common.graph import NNCFGraph
 from nncf.common.graph import NNCFNode
-from nncf.common.graph import NNCFNodeName
 from nncf.common.graph.layer_attributes import BaseLayerAttributes
 from nncf.common.graph.layer_attributes import ConvolutionLayerAttributes
 from nncf.common.graph.layer_attributes import Dtype
+from nncf.common.graph.operator_metatypes import OperatorMetatype
 from nncf.common.graph.operator_metatypes import UnknownMetatype
 from nncf.common.insertion_point_graph import InsertionPointGraph
 from nncf.common.insertion_point_graph import PostHookInsertionPoint
@@ -57,7 +57,9 @@ class NodeWithType:
         self.layer_attributes = layer_attributes
 
 
-def create_mock_graph(nodes: List[NodeWithType], node_edges: List[Tuple[str, str]]) -> nx.DiGraph:
+def create_mock_graph(
+    nodes: List[NodeWithType], node_edges: List[Tuple[str, str]], edges_attrs: Optional[Tuple[Any]] = None
+) -> nx.DiGraph:
     mock_graph = nx.DiGraph()
     for node in nodes:
         mock_node_attrs = get_mock_nncf_node_attrs(
@@ -67,7 +69,11 @@ def create_mock_graph(nodes: List[NodeWithType], node_edges: List[Tuple[str, str
             layer_attributes=node.layer_attributes,
         )
         mock_graph.add_node(node.node_name, **mock_node_attrs)
-    mock_graph.add_edges_from(node_edges)
+    if edges_attrs:
+        for (edge_from, edge_to), attr in zip(node_edges, edges_attrs):
+            mock_graph.add_edge(edge_from, edge_to, **attr)
+    else:
+        mock_graph.add_edges_from(node_edges)
     mark_input_ports_lexicographically_based_on_input_node_key(mock_graph)
     return mock_graph
 
@@ -93,22 +99,17 @@ def get_nncf_graph_from_mock_nx_graph(nx_graph: nx.DiGraph, nncf_graph_cls=NNCFG
         else:
             node_name = "/" + curr_node_key + "_0"
 
-        if NNCFNode.NODE_TYPE_ATTR in node:
-            node_type = node[NNCFNode.NODE_TYPE_ATTR]
-        else:
-            node_type = curr_node_key
-
+        node_type = node.get(NNCFNode.NODE_TYPE_ATTR, curr_node_key)
         layer_attributes = node.get(NNCFNode.LAYER_ATTRIBUTES)
 
         if NNCFNode.METATYPE_ATTR in node:
             metatype = node[NNCFNode.METATYPE_ATTR]
         else:
             metatype = METATYPES_FOR_TEST.get_operator_metatype_by_op_name(node_type)
-            if metatype is not UnknownMetatype:
-                if metatype.get_subtypes():
-                    subtype = metatype.determine_subtype(layer_attributes=layer_attributes)
-                    if subtype is not None:
-                        metatype = subtype
+            if metatype is not UnknownMetatype and metatype.get_subtypes():
+                subtype = metatype.determine_subtype(layer_attributes=layer_attributes)
+                if subtype is not None:
+                    metatype = subtype
 
         node_id = idx
         node = mock_graph.add_nncf_node(
@@ -125,12 +126,10 @@ def get_nncf_graph_from_mock_nx_graph(nx_graph: nx.DiGraph, nncf_graph_cls=NNCFG
             in_edge = (pred, curr_node_key)
             out_idx, creator_id = edge_vs_output_idx_and_creator_id[in_edge]
             edge_data = nx_graph.edges[in_edge]
-            if NNCFGraph.DTYPE_EDGE_ATTR in edge_data:
-                dtype = edge_data[NNCFGraph.DTYPE_EDGE_ATTR]
-            else:
-                dtype = Dtype.FLOAT
+            dtype = edge_data.get(NNCFGraph.DTYPE_EDGE_ATTR, Dtype.FLOAT)
+            shape = edge_data.get(NNCFGraph.ACTIVATION_SHAPE_EDGE_ATTR, [1, 1, 1, 1])
             mock_graph.add_edge_between_nncf_nodes(
-                creator_id, node_id, [1, 1, 1, 1], input_port_id=pred_idx, output_port_id=out_idx, dtype=dtype
+                creator_id, node_id, shape, input_port_id=pred_idx, output_port_id=out_idx, dtype=dtype
             )
 
         for out_idx, out_edge in enumerate(nx_graph.out_edges(curr_node_key)):
@@ -189,16 +188,26 @@ def get_mock_nncf_node_attrs(op_name=None, scope_str=None, metatype=None, type_=
 
 
 def _add_nodes_with_layer_attrs(
-    nx_graph: nx.DiGraph, node_keys: List[str], layer_attrs: Dict[str, BaseLayerAttributes]
+    nx_graph: nx.DiGraph,
+    node_keys: List[str],
+    layer_attrs: Dict[str, BaseLayerAttributes],
+    metatypes: Dict[str, OperatorMetatype] = None,
 ) -> nx.DiGraph:
     for node_key in node_keys:
-        nx_graph.add_node(node_key, **get_mock_nncf_node_attrs(op_name=node_key))
+        metatype = None
+        if metatypes is not None and node_key in metatypes:
+            metatype = metatypes[node_key]
+        nx_graph.add_node(node_key, **get_mock_nncf_node_attrs(op_name=node_key, metatype=metatype))
+
         if node_key in layer_attrs:
             nx_graph.nodes[node_key][NNCFNode.LAYER_ATTRIBUTES] = layer_attrs[node_key]
+
     return nx_graph
 
 
-def get_mock_model_graph_with_mergeable_pattern() -> NNCFGraph:
+def get_mock_model_graph_with_mergeable_pattern(
+    conv2d_metatype=None, batchnorm_metatype=None, relu_metatype=None
+) -> NNCFGraph:
     mock_nx_graph = nx.DiGraph()
 
     #   (A)
@@ -226,7 +235,12 @@ def get_mock_model_graph_with_mergeable_pattern() -> NNCFGraph:
             padding_values=[0, 0, 0, 0],
         )
     }
-    mock_nx_graph = _add_nodes_with_layer_attrs(mock_nx_graph, node_keys, layer_attrs)
+    metatypes = {
+        "conv2d": conv2d_metatype,
+        "batch_norm": batchnorm_metatype,
+        "relu": relu_metatype,
+    }
+    mock_nx_graph = _add_nodes_with_layer_attrs(mock_nx_graph, node_keys, layer_attrs, metatypes)
 
     mock_nx_graph.add_edges_from(
         [
@@ -239,7 +253,9 @@ def get_mock_model_graph_with_mergeable_pattern() -> NNCFGraph:
     return get_nncf_graph_from_mock_nx_graph(mock_nx_graph)
 
 
-def get_mock_model_graph_with_no_mergeable_pattern() -> NNCFGraph:
+def get_mock_model_graph_with_no_mergeable_pattern(
+    conv2d_metatype=None, batchnorm_metatype=None, relu_metatype=None
+) -> NNCFGraph:
     mock_nx_graph = nx.DiGraph()
 
     #   (A)
@@ -271,7 +287,12 @@ def get_mock_model_graph_with_no_mergeable_pattern() -> NNCFGraph:
             padding_values=[0, 0, 0, 0],
         )
     }
-    mock_nx_graph = _add_nodes_with_layer_attrs(mock_nx_graph, node_keys, layer_attrs)
+    metatypes = {
+        "conv2d": conv2d_metatype,
+        "batch_norm": batchnorm_metatype,
+        "relu": relu_metatype,
+    }
+    mock_nx_graph = _add_nodes_with_layer_attrs(mock_nx_graph, node_keys, layer_attrs, metatypes)
 
     mock_nx_graph.add_edges_from(
         [
@@ -286,7 +307,9 @@ def get_mock_model_graph_with_no_mergeable_pattern() -> NNCFGraph:
     return get_nncf_graph_from_mock_nx_graph(mock_nx_graph)
 
 
-def get_mock_model_graph_with_broken_output_edge_pattern() -> NNCFGraph:
+def get_mock_model_graph_with_broken_output_edge_pattern(
+    conv2d_metatype=None, batchnorm_metatype=None, relu_metatype=None
+) -> NNCFGraph:
     mock_nx_graph = nx.DiGraph()
 
     #   (A)
@@ -315,7 +338,12 @@ def get_mock_model_graph_with_broken_output_edge_pattern() -> NNCFGraph:
             padding_values=[0, 0, 0, 0],
         )
     }
-    mock_nx_graph = _add_nodes_with_layer_attrs(mock_nx_graph, node_keys, layer_attrs)
+    metatypes = {
+        "conv2d": conv2d_metatype,
+        "batch_norm": batchnorm_metatype,
+        "relu": relu_metatype,
+    }
+    mock_nx_graph = _add_nodes_with_layer_attrs(mock_nx_graph, node_keys, layer_attrs, metatypes)
 
     mock_nx_graph.add_edges_from(
         [
@@ -330,7 +358,7 @@ def get_mock_model_graph_with_broken_output_edge_pattern() -> NNCFGraph:
     return get_nncf_graph_from_mock_nx_graph(mock_nx_graph)
 
 
-def get_ip_graph_for_test(nncf_graph: NNCFGraph, weighted_node_names: List[NNCFNodeName] = None) -> InsertionPointGraph:
+def get_ip_graph_for_test(nncf_graph: NNCFGraph) -> InsertionPointGraph:
     pre_hooks = []
     post_hooks = []
     for node in nncf_graph.get_all_nodes():
@@ -345,14 +373,8 @@ def get_ip_graph_for_test(nncf_graph: NNCFGraph, weighted_node_names: List[NNCFN
         ip = PostHookInsertionPoint(node.node_name)
         post_hooks.append(ip)
 
-    weighted_target_points = None
-    if weighted_node_names is not None:
-        weighted_target_points = []
-        for name in weighted_node_names:
-            weighted_target_points.append(name)
     ip_graph = InsertionPointGraph(
         nncf_graph,
-        weight_modifiable_node_names=weighted_target_points,
         allowed_pre_hook_insertion_points=pre_hooks,
         allowed_post_hook_insertion_points=post_hooks,
     )
@@ -367,7 +389,7 @@ def get_randomly_connected_model_graph(op_name_keys: Set[str]) -> nx.DiGraph:
     graph_len = len(op_name_keys)
     mock_graph = nx.generators.gnc_graph(graph_len, None, 0)
 
-    shuffled_op_names = random.sample(op_name_keys, len(op_name_keys))
+    shuffled_op_names = random.sample(sorted(op_name_keys), len(op_name_keys))
     for idx, (_, node) in enumerate(mock_graph.nodes.items()):
         op_name = shuffled_op_names[idx]
         node[NNCFNode.NODE_NAME_ATTR] = get_node_name(shuffled_op_names[idx])
@@ -391,7 +413,7 @@ def get_sequentially_connected_model_graph(op_name_keys: List[str]) -> nx.DiGrap
 
         if node_key in OP_NAMES_IN_TEST_WITH_MODULE_ATTRIBUTES:
             attrs[NNCFNode.LAYER_ATTRIBUTES] = MagicMock()
-        actual_key = node_key + "_{}".format(node_key_appearances[node_key])
+        actual_key = node_key + f"_{node_key_appearances[node_key]}"
         graph.add_node(actual_key, **attrs)
         node_key_appearances[node_key] += 1
         actual_keys.append(actual_key)

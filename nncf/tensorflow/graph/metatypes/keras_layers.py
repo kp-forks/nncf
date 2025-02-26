@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -14,6 +14,7 @@ from typing import List, Optional, Type
 
 import tensorflow as tf
 
+import nncf
 from nncf.common.graph.operator_metatypes import INPUT_NOOP_METATYPES
 from nncf.common.graph.operator_metatypes import NOOP_METATYPES
 from nncf.common.graph.operator_metatypes import OperatorMetatype
@@ -65,7 +66,8 @@ class TFLayerMetatype(OperatorMetatype):
                 else:
                     matches.append(subtype)
         if len(matches) > 1:
-            raise RuntimeError("Multiple subtypes match operator call - cannot determine single subtype.")
+            msg = "Multiple subtypes match operator call - cannot determine single subtype."
+            raise nncf.InternalError(msg)
         if not matches:
             return None
         return matches[0]
@@ -86,7 +88,7 @@ class TFLayerNoopMetatype(TFLayerMetatype):
         return [cls.name]
 
 
-@KERAS_LAYER_METATYPES.register()
+@KERAS_LAYER_METATYPES.register(is_subtype=True)
 class TFDepthwiseConv1DSubLayerMetatype(TFLayerWithWeightsMetatype):
     name = "DepthwiseConv1D(Conv1DKerasLayer)"
     keras_layer_names = ["Conv1D", "Convolution1D"]
@@ -111,7 +113,7 @@ class TFConv1DLayerMetatype(TFLayerWithWeightsMetatype):
     bias_attr_name = "bias"
 
 
-@KERAS_LAYER_METATYPES.register()
+@KERAS_LAYER_METATYPES.register(is_subtype=True)
 class TFDepthwiseConv2DSubLayerMetatype(TFLayerWithWeightsMetatype):
     name = "DepthwiseConv2D(Conv2DKerasLayer)"
     keras_layer_names = ["Conv2D", "Convolution2D"]
@@ -136,7 +138,7 @@ class TFConv2DLayerMetatype(TFLayerWithWeightsMetatype):
     bias_attr_name = "bias"
 
 
-@KERAS_LAYER_METATYPES.register()
+@KERAS_LAYER_METATYPES.register(is_subtype=True)
 class TFDepthwiseConv3DSubLayerMetatype(TFLayerWithWeightsMetatype):
     name = "DepthwiseConv3D(Conv3DKerasLayer)"
     keras_layer_names = ["Conv3D", "Convolution3D"]
@@ -634,7 +636,8 @@ def _is_depthwise_conv(layer: tf.keras.layers.Layer, wrapper: Optional[tf.keras.
     )
 
     if channels is None:
-        raise ValueError("The channel dimension of the inputs should be defined. Found `None`.")
+        msg = "The channel dimension of the inputs should be defined. Found `None`."
+        raise ValueError(msg)
 
     input_channels = int(channels)
 

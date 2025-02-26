@@ -14,7 +14,7 @@
     "workers": 6,
     "multiprocessing_distributed": true,
     "epochs": 30,
-    "target_device": "VPU",
+    "target_device": "NPU",
     "compression": {
         "algorithm": "quantization",
         "initializer": {
@@ -35,5 +35,6 @@
             "disable_wd_start_epoch": 20
         }
     },
-    "no_strip_on_export": true
+    "no_strip_on_export": true,
+    "export_to_ir_via_onnx": true
 }

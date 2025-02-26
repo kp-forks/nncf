@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -24,15 +24,15 @@ import torch
 from examples.torch.common.utils import get_run_name
 from nncf import NNCFConfig
 from nncf.common.utils.registry import Registry
-from tests.shared.command import arg_list_from_arg_dict
-from tests.shared.config_factory import ConfigFactory
-from tests.shared.paths import EXAMPLES_DIR
-from tests.shared.paths import TEST_ROOT
+from tests.cross_fw.shared.command import arg_list_from_arg_dict
+from tests.cross_fw.shared.config_factory import ConfigFactory
+from tests.cross_fw.shared.paths import EXAMPLES_DIR
+from tests.cross_fw.shared.paths import TEST_ROOT
 
 
 def create_command_line(args: Dict[str, Any], sample_type: str, main_filename: str = "main.py") -> str:
     executable = EXAMPLES_DIR.joinpath("torch", sample_type, main_filename).as_posix()
-    cli_args = " ".join(key if (val is None or val is True) else "{} {}".format(key, val) for key, val in args.items())
+    cli_args = " ".join(key if (val is None or val is True) else f"{key} {val}" for key, val in args.items())
     return f"{sys.executable} {executable} {cli_args}"
 
 
@@ -40,6 +40,7 @@ class SampleType(Enum):
     CLASSIFICATION = "classification"
     CLASSIFICATION_STAGED = "classification_staged"
     CLASSIFICATION_NAS = "classification_nas"
+    CLASSIFICATION_NAS_SEARCH = "classification_nas_search"
     SEMANTIC_SEGMENTATION = "semantic_segmentation"
     OBJECT_DETECTION = "object_detection"
 
@@ -83,10 +84,6 @@ class BaseSampleHandler(ABC):
         """
         return self.get_sample_location() + ".train"
 
-    def mock_mlflow(self, mocker):
-        mlflow_location = self.get_sample_location() + ".SafeMLFLow"
-        mocker.patch(mlflow_location)
-
     @staticmethod
     def get_checkpoint_path(
         checkpoint_save_dir: str, checkpoint_name: Optional[str] = None, config_path: Optional[Path] = None
@@ -106,8 +103,8 @@ class ClassificationHandler(BaseSampleHandler):
         self, checkpoint_save_dir: str, checkpoint_name: Optional[str] = None, config_path: Optional[Path] = None
     ):
         checkpoint_path = self.get_checkpoint_path(checkpoint_save_dir, checkpoint_name, config_path)
-        assert os.path.exists(checkpoint_path), "Path to checkpoint {} does not exist".format(checkpoint_path)
-        accuracy = torch.load(checkpoint_path)["best_acc1"]
+        assert os.path.exists(checkpoint_path), f"Path to checkpoint {checkpoint_path} does not exist"
+        accuracy = torch.load(checkpoint_path, weights_only=False)["best_acc1"]
         return accuracy
 
     def get_sample_dir_name(self) -> str:
@@ -141,6 +138,12 @@ class ClassificationNASHandler(ClassificationHandler):
 
     def get_optimal_subnet_accuracy(self):
         pass
+
+
+@SAMPLE_HANDLERS.register(SampleType.CLASSIFICATION_NAS_SEARCH)
+class ClassificationNASSearchHandler(ClassificationNASHandler):
+    def _get_main_filename(self):
+        return "bootstrap_nas_search"
 
 
 @SAMPLE_HANDLERS.register(SampleType.OBJECT_DETECTION)
@@ -246,7 +249,7 @@ class SanityTestCaseDescriptor(BaseSampleTestCaseDescriptor, ABC):
 
     def get_config_update(self) -> Dict:
         sample_params = self.get_sample_params()
-        return {**sample_params, "target_device": "VPU", "compression": self.get_compression_section()}
+        return {**sample_params, "target_device": "NPU", "compression": self.get_compression_section()}
 
     def get_sample_params(self) -> Dict:
         return {"dataset": self.dataset_name} if self.dataset_name else {}

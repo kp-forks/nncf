@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -21,6 +21,7 @@ import torch
 from _pytest.mark import ParameterSet
 from torch import nn
 
+import nncf
 from nncf.common.graph import NNCFGraph
 from nncf.torch.model_creation import wrap_model
 
@@ -69,7 +70,7 @@ class BaseTestModel(ABC):
             example_input = {k: torch.tensor(v) for k, v in example.items()}
         assert example_input is not None
 
-        nncf_model = wrap_model(fw_model, example_input)
+        nncf_model = wrap_model(fw_model, example_input, trace_parameters=True)
 
         self.check_graph(nncf_model.nncf.get_original_graph())
 
@@ -115,9 +116,10 @@ def get_models_list(path: Path) -> List[ModelInfo]:
                 model_name, model_link, mark, reason = splitted
                 if model_link == "none":
                     model_link = None
-                assert mark in ["skip", "xfail"], "Incorrect failure mark for model info {}".format(model_info)
+                assert mark in ["skip", "xfail"], f"Incorrect failure mark for model info {model_info}"
             else:
-                raise RuntimeError(f"Incorrect model info `{model_info}`. It must contain either 1, 2 or 3 fields.")
+                msg = f"Incorrect model info `{model_info}`. It must contain either 1, 2 or 3 fields."
+                raise nncf.ValidationError(msg)
             models.append(ModelInfo(model_name, model_link, mark, reason))
 
     return models

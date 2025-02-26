@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -20,13 +20,14 @@ from nncf.quantization.advanced_parameters import AdvancedQuantizationParameters
 from nncf.quantization.advanced_parameters import AdvancedSmoothQuantParameters
 from nncf.quantization.advanced_parameters import OverflowFix
 from nncf.quantization.algorithms.post_training.algorithm import PostTrainingQuantization
-from nncf.torch.model_creation import create_nncf_network
+from nncf.torch import wrap_model
+from nncf.torch.dynamic_graph.scope import Scope
 from nncf.torch.nncf_network import NNCFNetwork
 from nncf.torch.quantization.layers import QUANTIZATION_MODULES
 from nncf.torch.utils import get_all_modules_by_type
-from tests.shared.helpers import compare_stats
-from tests.shared.helpers import load_json
-from tests.shared.paths import TEST_ROOT
+from tests.cross_fw.shared.comparator import compare_stats
+from tests.cross_fw.shared.json import load_json
+from tests.cross_fw.shared.paths import TEST_ROOT
 from tests.torch.helpers import TwoConvTestModel
 from tests.torch.helpers import create_random_mock_dataloader
 
@@ -56,16 +57,18 @@ def min_max_quantize_model(
     post_training_quantization = PostTrainingQuantization(subset_size=1, **quantization_params)
 
     original_model.eval()
-    nncf_network = create_nncf_network(original_model, config)
+    nncf_network = wrap_model(original_model, torch.ones([1, 1, 10, 10]), trace_parameters=True)
     quantized_model = post_training_quantization.apply(nncf_network, nncf_network.nncf.get_graph(), dataset=dataset)
     return quantized_model
 
 
-def get_fq_nodes_params(model: NNCFNetwork) -> Dict[str, np.ndarray]:
-    output = {}
+def get_fq_nodes(model: NNCFNetwork) -> Dict[Scope, torch.nn.Module]:
     quantization_types = [class_type.__name__ for class_type in QUANTIZATION_MODULES.registry_dict.values()]
-    nncf_module_quantizations = get_all_modules_by_type(model, quantization_types)
+    return get_all_modules_by_type(model, quantization_types)
 
+
+def get_fq_nodes_params(nncf_module_quantizations: Dict[Scope, torch.nn.Module]) -> Dict[str, np.ndarray]:
+    output = {}
     for name, nncf_module_quantization in nncf_module_quantizations.items():
         input_low, input_high = nncf_module_quantization.get_input_low_input_high()
         input_low = input_low.cpu().detach().numpy()
@@ -85,12 +88,16 @@ def test_overflow_fix_scales(_seed, overflow_fix):
     quantized_model = min_max_quantize_model(
         model, quantization_params={"advanced_parameters": AdvancedQuantizationParameters(overflow_fix=overflow_fix)}
     )
-    fq_nodes_params = get_fq_nodes_params(quantized_model)
+    fq_nodes = get_fq_nodes(quantized_model)
+    for quantizer in fq_nodes.values():
+        assert quantizer.eps >= 1e-16
+
+    fq_nodes_params = get_fq_nodes_params(fq_nodes)
 
     ref_stats_name = "TwoConvTestModel" + f"_overflow_fix_{overflow_fix.value}.json"
     ref_stats_path = REFERENCE_SCALES_DIR / ref_stats_name
 
-    # Unkomment lines below to generate reference for new models.
+    # Uncomment lines below to generate reference for new models.
     # from tests.shared.helpers import dump_to_json
     # dump_to_json(ref_stats_path, fq_nodes_params)
 

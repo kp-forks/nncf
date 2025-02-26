@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -81,7 +81,12 @@ class SSD_VGG(nn.Module):
             # trust.
             #
             self.load_state_dict(
-                torch.load(base_file, map_location=lambda storage, loc: storage, pickle_module=restricted_pickle_module)
+                torch.load(
+                    base_file,
+                    weights_only=False,
+                    map_location=lambda storage, loc: storage,
+                    pickle_module=restricted_pickle_module,
+                )
             )
             logger.debug("Finished!")
         else:
@@ -170,7 +175,7 @@ def build_ssd_vgg(cfg, size, num_classes, config):
 
     if config.basenet and (config.resuming_checkpoint_path is None) and (config.weights is None):
         logger.debug("Loading base network...")
-        basenet_weights = torch.load(config.basenet, pickle_module=restricted_pickle_module)
+        basenet_weights = torch.load(config.basenet, pickle_module=restricted_pickle_module, weights_only=False)
         new_weights = {}
         for wn, wv in basenet_weights.items():
             wn = wn.replace("features.", "")
