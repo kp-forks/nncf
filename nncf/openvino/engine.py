@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -13,9 +13,11 @@ from typing import Dict, List, Tuple, Union
 
 import numpy as np
 import openvino.runtime as ov
+from openvino import Type
+from openvino.properties.hint import inference_precision
 
 from nncf.common.engine import Engine
-from nncf.parameters import TargetDevice
+from nncf.openvino.graph.model_utils import model_has_state
 
 
 class OVCompiledModelEngine(Engine):
@@ -27,30 +29,9 @@ class OVCompiledModelEngine(Engine):
     to infer the compiled model.
     """
 
-    def __init__(self, model: ov.CompiledModel):
-        self.compiled_model = model
-        self.input_tensor_names = set()
-        self.number_of_inputs = len(model.inputs)
-        for model_input in model.inputs:
-            self.input_tensor_names.update(model_input.get_names())
-
-    def _check_input_data_format(
-        self, input_data: Union[np.ndarray, List[np.ndarray], Tuple[np.ndarray], Dict[str, np.ndarray]]
-    ) -> None:
-        """
-        Checks correspondence of the model input names and the passed data.
-        If there is a mismatch, the method throws a more specific and readable error than
-        original error raised by the compiled model.
-
-        :param input_data: Provided inputs to infer the model.
-        """
-        actual_num_inputs = 1 if isinstance(input_data, np.ndarray) else len(input_data)
-        if actual_num_inputs != self.number_of_inputs:
-            raise RuntimeError(f"Model expects {self.number_of_inputs} inputs, but {actual_num_inputs} are provided.")
-        if isinstance(input_data, dict):
-            for name in input_data:
-                if isinstance(name, str) and name not in self.input_tensor_names:
-                    raise RuntimeError(f"Missing a required input: {name} to run the model.")
+    def __init__(self, compiled_model: ov.CompiledModel, stateful: bool):
+        self.infer_request = compiled_model.create_infer_request()
+        self.reset_state = stateful and hasattr(self.infer_request, "reset_state")
 
     def infer(
         self, input_data: Union[np.ndarray, List[np.ndarray], Tuple[np.ndarray], Dict[str, np.ndarray]]
@@ -62,8 +43,10 @@ class OVCompiledModelEngine(Engine):
         :param input_data: Inputs for the model.
         :return output_data: Model's output.
         """
-        self._check_input_data_format(input_data)
-        model_outputs = self.compiled_model(input_data)
+        if self.reset_state:
+            self.infer_request.reset_state()
+
+        model_outputs = self.infer_request.infer(input_data, share_inputs=True)
 
         output_data = {}
         for tensor, value in model_outputs.items():
@@ -81,13 +64,19 @@ class OVNativeEngine(Engine):
     to infer the model.
     """
 
-    def __init__(self, model: ov.Model, target_device: TargetDevice = TargetDevice.CPU):
-        if target_device == TargetDevice.ANY:
-            target_device = TargetDevice.CPU
-
+    def __init__(self, model: ov.Model, use_fp32_precision: bool = True):
+        """
+        :param model: Model.
+        :param use_fp32_precision: A flag that determines whether to force the engine to use FP32
+            precision during inference.
+        """
+        config = None
+        if use_fp32_precision:
+            config = {inference_precision: Type.f32}
         ie = ov.Core()
-        compiled_model = ie.compile_model(model, target_device.value)
-        self.engine = OVCompiledModelEngine(compiled_model)
+        stateful = model_has_state(model)
+        compiled_model = ie.compile_model(model, device_name="CPU", config=config)
+        self.engine = OVCompiledModelEngine(compiled_model, stateful)
 
     def infer(
         self, input_data: Union[np.ndarray, List[np.ndarray], Tuple[np.ndarray], Dict[str, np.ndarray]]

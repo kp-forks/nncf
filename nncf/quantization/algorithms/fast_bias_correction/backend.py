@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -13,15 +13,15 @@ from abc import ABC
 from abc import abstractmethod
 from typing import Dict, List, Optional, Tuple, TypeVar, Union
 
-import numpy as np
-
 from nncf.common.graph import NNCFGraph
 from nncf.common.graph import NNCFNode
+from nncf.common.graph.model_transformer import ModelTransformer
 from nncf.common.graph.transformations.commands import TargetPoint
 from nncf.common.graph.transformations.commands import TargetType
 from nncf.common.graph.transformations.commands import TransformationCommand
+from nncf.common.graph.transformations.layout import TransformationLayout
 from nncf.common.tensor_statistics.collectors import TensorStatisticCollectorBase
-from nncf.experimental.tensor import Tensor
+from nncf.tensor import Tensor
 
 TModel = TypeVar("TModel")
 TTensor = TypeVar("TTensor")
@@ -44,7 +44,7 @@ class FastBiasCorrectionAlgoBackend(ABC):
     @staticmethod
     @abstractmethod
     def create_bias_correction_command(
-        node: NNCFNode, bias_value: np.ndarray, nncf_graph: NNCFGraph
+        node: NNCFNode, bias_value: Tensor, nncf_graph: NNCFGraph
     ) -> TransformationCommand:
         """
         Creates backend-specific command to update bias value.
@@ -57,12 +57,16 @@ class FastBiasCorrectionAlgoBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def model_extraction_command(inputs: List[str], outputs: List[str]) -> TransformationCommand:
+    def model_extraction_command(
+        input_ids: List[Tuple[str, int]], output_ids: List[Tuple[str, int]]
+    ) -> TransformationCommand:
         """
         Returns backend-specific command to extract sub-model based on input & output names.
 
-        :param inputs: List of the input names for sub-model beginning.
-        :param outputs: List of the output names for sub-model end.
+        :param input_ids: List of the input IDs: pairs of node names and correspondent input port ids.
+            Each pair denotes the sub-graph beginning.
+        :param output_ids: List of the output IDs: pairs of node names and correspondent output port ids.
+            Each pair denotes the sub-graph ending.
         :return: Backend-specific TransformationCommand for the model extraction.
         """
 
@@ -86,7 +90,7 @@ class FastBiasCorrectionAlgoBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_sub_input_output_names(subgraph: TModel) -> Tuple[str, str]:
+    def get_sub_input_output_names(subgraph: TModel) -> Tuple[Union[str, int], Union[str]]:
         """
         Returns tuple of the subgraph's the input & output tensor names respectively.
 
@@ -147,7 +151,7 @@ class FastBiasCorrectionAlgoBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def process_model_output(raw_data: OutputType, output_name: str) -> Tensor:
+    def process_model_output(raw_data: OutputType, output_name: Union[str, int]) -> Tensor:
         """
         Returns backend-specific processed output from the model.
 
@@ -180,3 +184,32 @@ class FastBiasCorrectionAlgoBackend(ABC):
             Name of node to collect input statistics
             Name of node to collect output statistics
         """
+
+    @staticmethod
+    @abstractmethod
+    def get_activation_channel_axis(node: NNCFNode, port_id: int, input_shape: Tuple[int]) -> int:
+        """
+        Returns axis number of the activation tensor which correspond to it channel.
+
+        :param node: NNCFNode instance.
+        :param port_id: Port ID for input.
+        :param input_shape: Shape of the input.
+        :return: Channel axis number.
+        """
+
+    def extract_submodel(
+        self, model_transformer: ModelTransformer, input_id: Tuple[str, int], output_id: Tuple[str, int]
+    ) -> TModel:
+        """
+        Extracts sub-model using backend-specific ModelTransformer.
+
+        :param model_transformer: Backend-specific ModelTransformer.
+        :param input_id: Input ID.
+        :param output_id: Output ID.
+        :return: Backend-specific sub-model.
+        """
+        model_extraction_command = self.model_extraction_command([input_id], [output_id])
+        me_transformation_layout = TransformationLayout()
+        me_transformation_layout.register(model_extraction_command)
+        extracted_model = model_transformer.transform(me_transformation_layout)
+        return extracted_model

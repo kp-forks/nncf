@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -16,14 +16,17 @@ from typing import Callable, Dict, List, Tuple
 import numpy as np
 import torch
 
+import nncf
 from nncf.common.graph.layer_attributes import WeightedLayerAttributes
+from nncf.common.graph.utils import get_target_dim_for_compression_legacy
+from nncf.common.graph.utils import get_weight_shape_legacy
 from nncf.common.quantization.initialization.range import RangeInitCollectorParams
 from nncf.common.quantization.initialization.range import RangeInitConfig
 from nncf.common.quantization.initialization.range import RangeInitParams
 from nncf.common.quantization.quantizer_setup import QuantizationPointBase
 from nncf.common.quantization.quantizer_setup import QuantizerSetupBase
 from nncf.common.quantization.structs import NonWeightQuantizerId
-from nncf.common.quantization.structs import QuantizationMode
+from nncf.common.quantization.structs import QuantizationScheme
 from nncf.common.quantization.structs import QuantizerGroup
 from nncf.common.quantization.structs import QuantizerId
 from nncf.common.quantization.structs import WeightQuantizerId
@@ -71,66 +74,43 @@ class PTRangeInitParams(RangeInitParams):
     def get_init_config_for_scope_and_group(self, qid: QuantizerId, group: QuantizerGroup) -> RangeInitConfig:
         matches: List[RangeInitConfig] = []
         for pl_config in self.per_layer_range_init_configs:
-            if should_consider_scope(qid, pl_config.ignored_scopes, pl_config.target_scopes):
-                if group == pl_config.target_group or pl_config.target_group is None:
-                    matches.append(
-                        RangeInitConfig(
-                            pl_config.init_type, pl_config.num_init_samples, pl_config.init_type_specific_params
-                        )
+            should_be_considered = should_consider_scope(qid, pl_config.ignored_scopes, pl_config.target_scopes)
+            if should_be_considered and (group == pl_config.target_group or pl_config.target_group is None):
+                matches.append(
+                    RangeInitConfig(
+                        pl_config.init_type, pl_config.num_init_samples, pl_config.init_type_specific_params
                     )
+                )
         if len(matches) > 1:
-            raise ValueError(
-                "Location {} matches more than one per-layer initialization parameter definition!".format(str(qid))
-            )
+            msg = f"Location {str(qid)} matches more than one per-layer initialization parameter definition!"
+            raise ValueError(msg)
         if len(matches) == 1:
             return matches[0]
         if not matches and self.global_init_config is not None:
             return deepcopy(self.global_init_config)
 
-        raise ValueError(
-            "Location {} does not match any per-layer initialization parameter definition!".format(str(qid))
-        )
+        msg = f"Location {str(qid)} does not match any per-layer initialization parameter definition!"
+        raise ValueError(msg)
 
 
 class PTRangeInitCollectorParams(RangeInitCollectorParams):
     def __init__(
-        self, is_weights: bool, mode: QuantizationMode, per_channel: bool, input_shape: tuple, channel_idx: int
+        self, is_weights: bool, scheme: QuantizationScheme, per_channel: bool, input_shape: tuple, channel_idx: int
     ):
         """
-
+        :param is_weights: Boolean that defines tensor type. True for Weights, False for Activations.
+        :param scheme: Quantization scheme: symmetric or asymmetric.
         :param input_shape: Shape of the input tensor.
         :param channel_idx: Channel dimension.
         """
-        super().__init__(is_weights, mode, per_channel)
+        super().__init__(is_weights, scheme, per_channel)
         self._input_shape = input_shape
         self._channel_idx = channel_idx
 
-    def get_reduction_axes(self, per_sample_stats: bool) -> ReductionAxes:
-        """
-        Calculates the reduction axes of the tensor.
-
-        :param per_sample_stats: Boolean flag that indicated whether statistics are collected per-sample or per-batch.
-        :return: Shape to reduce to.
-        """
-        ndims = len(self._input_shape)
-        reduction_axes: List[int] = list(range(ndims))
-        if self._per_channel:
-            val = (ndims + self._channel_idx) % ndims
-            reduction_axes.remove(val)
-            if not val and self.use_per_sample_stats(per_sample_stats):
-                raise RuntimeError("Batch dimension should be equal to zero")
-        if self.use_per_sample_stats(per_sample_stats):
-            reduction_axes = reduction_axes[1:]  # Assumes batch is the first dimension
-        return tuple(reduction_axes)
-
-    def get_aggregation_axes(self, per_sample_stats: bool) -> AggregationAxes:
-        """
-        Calculates the aggregation axes of the tensor.
-
-        :param per_sample_stats: Boolean flag that indicated whether statistics are collected per-sample or per-batch.
-        :return: Shape to aggregate to.
-        """
-        return (0, 1) if self.use_per_sample_stats(per_sample_stats) else (0,)
+    def get_reduction_aggregation_axes(self, is_per_sample: bool) -> Tuple[ReductionAxes, AggregationAxes]:
+        if self.is_per_channel:
+            return super().get_reduction_aggregation_axes(self._input_shape, (self._channel_idx,), is_per_sample)
+        return super().get_reduction_aggregation_axes(self._input_shape, (), is_per_sample)
 
 
 class StatCollectorGenerator:
@@ -175,12 +155,11 @@ class StatCollectorGenerator:
         if num_samples_to_collect_override is not None:
             num_samples = num_samples_to_collect_override
         if init_config.init_type not in RANGE_INIT_TYPES_VS_DESCRIPTIONS:
-            raise RuntimeError("Unknown range init type: {}".format(init_config.init_type))
+            msg = f"Unknown range init type: {init_config.init_type}"
+            raise nncf.InternalError(msg)
 
         use_per_sample_stats = collector_params.use_per_sample_stats(init_config.init_type == "mixed_min_max")
-        reduction_axes = collector_params.get_reduction_axes(use_per_sample_stats)
-        aggregation_axes = collector_params.get_aggregation_axes(use_per_sample_stats)
-
+        reduction_axes, aggregation_axes = collector_params.get_reduction_aggregation_axes(use_per_sample_stats)
         if init_config.init_type == "min_max":
             return get_min_max_statistic_collector(
                 use_abs_max=collector_params.use_abs_max,
@@ -237,7 +216,8 @@ class StatCollectorGenerator:
                 scale_shape=scale_shape,
                 num_samples=num_samples,
             )
-        raise ValueError("Range init type not handled!")
+        msg = "Range init type not handled!"
+        raise ValueError(msg)
 
     @classmethod
     def get_all_scale_shapes_with_params(
@@ -248,8 +228,8 @@ class StatCollectorGenerator:
             module_node = target_nncf_graph.get_node_by_name(qp.insertion_point.target_node_name)
             layer_attributes = module_node.layer_attributes
             assert isinstance(layer_attributes, WeightedLayerAttributes)
-            input_shape = layer_attributes.get_weight_shape()
-            channel_idx = layer_attributes.get_target_dim_for_compression()
+            input_shape = get_weight_shape_legacy(layer_attributes)
+            channel_idx = get_target_dim_for_compression_legacy(layer_attributes)
         else:
             input_shape = target_nncf_graph.get_input_shape_for_insertion_point(qp.insertion_point)
             channel_idx = 1  # channel dim for activations
@@ -282,9 +262,9 @@ class DataLoaderRangeInitializeRunner(DataLoaderBaseRunner):
         self.modules_to_init = modules_to_init_vs_init_configs
         self.progressbar_description = "Range parameters initialization"
 
-        self.collectors_and_modules_to_init: Dict[
-            str, Tuple[TensorStatisticCollectorBase, BaseQuantizer]
-        ] = OrderedDict()
+        self.collectors_and_modules_to_init: Dict[str, Tuple[TensorStatisticCollectorBase, BaseQuantizer]] = (
+            OrderedDict()
+        )
         self.hook_handles = []
         self.batch_size = batch_size
 
@@ -307,9 +287,9 @@ class DataLoaderRangeInitializeRunner(DataLoaderBaseRunner):
                 num_samples_override = num_batches
 
             if isinstance(quantizer_module, SymmetricQuantizer):
-                mode = QuantizationMode.SYMMETRIC
+                mode = QuantizationScheme.SYMMETRIC
             else:
-                mode = QuantizationMode.ASYMMETRIC
+                mode = QuantizationScheme.ASYMMETRIC
 
             shape = quantizer_module.scale_shape
             if shape == (1,):  # Per-tensor
@@ -342,5 +322,5 @@ class DataLoaderRangeInitializeRunner(DataLoaderBaseRunner):
             target_stat = collector.get_statistics()
             minmax_stats = pt_convert_stat_to_min_max_tensor_stat(target_stat)
             quantizer_module.apply_minmax_init(
-                minmax_stats.min_values, minmax_stats.max_values, log_module_name=scope_str
+                minmax_stats.min_values.data, minmax_stats.max_values.data, log_module_name=scope_str
             )

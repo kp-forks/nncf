@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -14,7 +14,8 @@ import numpy as np
 import torch
 from torch.quantization.fake_quantize import FakeQuantize
 
-from nncf.torch.nncf_network import ExtraCompressionModuleType
+import nncf
+from nncf.torch.graph.transformations.commands import ExtraCompressionModuleType
 from nncf.torch.nncf_network import NNCFNetwork
 from nncf.torch.quantization.layers import AsymmetricQuantizer
 from nncf.torch.quantization.layers import BaseQuantizer
@@ -33,7 +34,7 @@ def replace_quantizer_to_torch_native_module(model: NNCFNetwork) -> NNCFNetwork:
     compression_module_type = ExtraCompressionModuleType.EXTERNAL_QUANTIZER
     if model.nncf.is_compression_module_registered(compression_module_type):
         external_quantizers = model.nncf.get_compression_modules_by_type(compression_module_type)
-        for key in external_quantizers.keys():
+        for key in external_quantizers:
             if external_quantizers[key].is_enabled_quantization():
                 external_quantizers[key] = convert_to_torch_fakequantizer(external_quantizers[key])
 
@@ -74,15 +75,15 @@ def convert_to_torch_fakequantizer(nncf_quantizer: BaseQuantizer) -> FakeQuantiz
     :param quantizer: NNCF Quantizer module.
     :return: Instance of FakeQuantize similar to the input quantizer.
     """
-
     # Call set_ranges in case the basic parameters impacting levels had changed
     nncf_quantizer.set_levels()
 
     if nncf_quantizer.num_bits not in SUPPORTED_NUM_BITS_FOR_STRIP_MODEL:
-        raise RuntimeError(
+        msg = (
             "Converting nncf quantizer module to torch native only supports "
             f"for num_bits in {SUPPORTED_NUM_BITS_FOR_STRIP_MODEL}."
         )
+        raise nncf.InternalError(msg)
     per_channel = nncf_quantizer.per_channel
     scale_shape = nncf_quantizer.scale_shape
     ch_axis = int(np.argmax(scale_shape))
@@ -137,6 +138,9 @@ def remove_disabled_quantizers(model: NNCFNetwork) -> NNCFNetwork:
             op = external_quantizers[key]
             if isinstance(op, BaseQuantizer) and not op.is_enabled_quantization():
                 external_quantizers.pop(key)
+
+    if not model.nncf.replace_modules:
+        return model
 
     for node in model.nncf.get_original_graph().get_all_nodes():
         if node.node_type in ["nncf_model_input", "nncf_model_output"]:

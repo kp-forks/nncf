@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -10,14 +10,14 @@
 # limitations under the License.
 
 from importlib import import_module
-from typing import Callable, List
+from typing import Any, Callable, Dict, List
 
 from nncf.common.logging import nncf_logger
 
-IMPORTED_DEPENDENCIES = {}
+IMPORTED_DEPENDENCIES: Dict[str, bool] = {}
 
 
-def skip_if_dependency_unavailable(dependencies: List[str]) -> Callable:
+def skip_if_dependency_unavailable(dependencies: List[str]) -> Callable[[Callable[..., None]], Callable[..., None]]:
     """
     Decorator factory to skip a noreturn function if dependencies are not met.
 
@@ -26,7 +26,7 @@ def skip_if_dependency_unavailable(dependencies: List[str]) -> Callable:
     """
 
     def wrap(func: Callable[..., None]) -> Callable[..., None]:
-        def wrapped_f(*args, **kwargs):
+        def wrapped_f(*args: Any, **kwargs: Any):  # type: ignore
             for libname in dependencies:
                 if libname in IMPORTED_DEPENDENCIES:
                     if IMPORTED_DEPENDENCIES[libname]:
@@ -37,10 +37,10 @@ def skip_if_dependency_unavailable(dependencies: List[str]) -> Callable:
                     IMPORTED_DEPENDENCIES[libname] = True
                 except ImportError as ex:
                     nncf_logger.warning(
-                        f"{ex.msg} Please install NNCF package with dev "
+                        f"{ex.msg} Please install NNCF package with plots "
                         "extra. Use one of the following commands "
-                        '"pip install .[dev]" running from the repository '
-                        'root directory or "pip install nncf[dev]"'
+                        '"pip install .[plots]" running from the repository '
+                        'root directory or "pip install nncf[plots]"'
                     )
                     IMPORTED_DEPENDENCIES[libname] = False
                     break

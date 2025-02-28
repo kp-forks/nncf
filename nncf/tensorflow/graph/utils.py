@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -14,6 +14,7 @@ from typing import List, Tuple
 
 import tensorflow as tf
 
+import nncf
 from nncf.common.graph import NNCFGraph
 from nncf.common.graph import NNCFNode
 from nncf.common.graph import NNCFNodeName
@@ -80,9 +81,8 @@ def get_custom_objects(model):
             layer = layer.layer
         if layer.__class__.__name__ not in keras_layers:
             custom_objects[layer.__class__.__name__] = layer.__class__
-        if layer.__class__.__name__ == "Activation":
-            if layer.activation.__name__ not in keras_activations:
-                custom_objects[layer.activation.__name__] = layer.activation
+        if layer.__class__.__name__ == "Activation" and layer.activation.__name__ not in keras_activations:
+            custom_objects[layer.activation.__name__] = layer.activation
     return custom_objects
 
 
@@ -110,7 +110,7 @@ def collect_wrapped_layers(model):
 
 
 def get_shared_node_name(layer_name: str, instance_idx: int):
-    return "{}{}{}".format(layer_name, SHARED_OPERATION_MARK, instance_idx)
+    return f"{layer_name}{SHARED_OPERATION_MARK}{instance_idx}"
 
 
 def get_original_name_and_instance_idx(node_name: NNCFNodeName):
@@ -129,7 +129,8 @@ def get_layer_to_graph_nodes_map(model, node_names):
     for node in node_names:
         parent_layer_name = node.split("/")[1]  # model_name/layer_name/layer_op_name/...
         if parent_layer_name not in layer_to_nodes_map:
-            raise RuntimeError("Could not find {} layer in Model".format(parent_layer_name))
+            msg = f"Could not find {parent_layer_name} layer in Model"
+            raise nncf.ValidationError(msg)
         layer_to_nodes_map[parent_layer_name]["nodes"].append(node)
     return layer_to_nodes_map
 
@@ -191,8 +192,8 @@ def get_list_level(lst: List) -> int:
 
 
 def check_oplambda_input_data(x: List) -> bool:
-    input_stracture = [type(item) for item in x]
-    return input_stracture in ([str, int, int], [str, int, int, dict])
+    input_structure = [type(item) for item in x]
+    return input_structure in ([str, int, int], [str, int, int, dict])
 
 
 def reformat_inbound_nodes_for_oplambda(inbound_nodes: List) -> List[List[List]]:

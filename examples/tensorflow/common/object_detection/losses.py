@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -142,7 +142,7 @@ class RpnBoxLoss:
     """Region Proposal Network box regression loss function."""
 
     def __init__(self, params):
-        logger.info("RpnBoxLoss huber_loss_delta {}".format(params.huber_loss_delta))
+        logger.info(f"RpnBoxLoss huber_loss_delta {params.huber_loss_delta}")
         # The delta is typically around the mean value of regression target.
         # for instances, the regression targets of 512x512 input with 6 anchors on
         # P2-P6 pyramid is about [0.1, 0.1, 0.2, 0.2].
@@ -230,7 +230,7 @@ class FastrcnnBoxLoss:
     """Fast R-CNN box regression loss function."""
 
     def __init__(self, params):
-        logger.info("FastrcnnBoxLoss huber_loss_delta {}".format(params.huber_loss_delta))
+        logger.info(f"FastrcnnBoxLoss huber_loss_delta {params.huber_loss_delta}")
         # The delta is typically around the mean value of regression target.
         # for instances, the regression targets of 512x512 input with 6 anchors on
         # P2-P6 pyramid is about [0.1, 0.1, 0.2, 0.2].
@@ -379,7 +379,7 @@ class RetinanetClassLoss:
         num_positives_sum = tf.reduce_sum(input_tensor=num_positives) + 1.0
 
         cls_losses = []
-        for level in cls_outputs.keys():
+        for level in cls_outputs:
             cls_losses.append(self.class_loss(cls_outputs[level], labels[int(level)], num_positives_sum))
 
         # Sums per level losses to total loss.
@@ -440,7 +440,7 @@ class RetinanetBoxLoss:
         num_positives_sum = tf.reduce_sum(input_tensor=num_positives) + 1.0
 
         box_losses = []
-        for level in box_outputs.keys():
+        for level in box_outputs:
             box_targets_l = labels[int(level)]
             box_losses.append(self.box_loss(box_outputs[level], box_targets_l, num_positives_sum))
 

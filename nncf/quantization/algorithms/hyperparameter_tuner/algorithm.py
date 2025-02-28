@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -345,7 +345,7 @@ class HyperparameterTuner:
 
         :param step_index: Zero-based index of pipeline step that should be prepared.
         :param step_model: A model.
-        :param step_graph: A graph assosiated with a model.
+        :param step_graph: A graph associated with a model.
         :param step_combinations: Combinations that change parameters only for the step_index-th pipeline step.
         """
         # Create a separate pipeline for each combination

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -9,22 +9,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from nncf.experimental.tensor import Tensor
-from nncf.experimental.tensor import functions as fns
+from typing import Optional
+
+from nncf.tensor import Tensor
+from nncf.tensor import TensorDataType
+from nncf.tensor import functions as fns
 
 
-def mean_per_channel(x: Tensor, axis: int) -> Tensor:
+def mean_per_channel(x: Tensor, axis: int, dtype: Optional[TensorDataType] = None) -> Tensor:
     """
     Computes the mean of elements across given channel dimension of Tensor.
 
     :param x: Tensor to reduce.
     :param axis: The channel dimensions to reduce.
+    :param dtype: Type to use in computing the mean.
     :return: Reduced Tensor.
     """
     if len(x.shape) < 3:
-        return fns.mean(x, axis=0)
+        return fns.mean(x, axis=0, dtype=dtype)
+
     pos_axis = axis + x.ndim if axis < 0 else axis
     if pos_axis < 0 or pos_axis >= x.ndim:
-        raise ValueError(f"axis {axis} is out of bounds for array of dimension {x.ndim}")
+        msg = f"axis {axis} is out of bounds for array of dimension {x.ndim}"
+        raise ValueError(msg)
     axis = tuple(i for i in range(x.ndim) if i != pos_axis)
-    return fns.mean(x, axis=axis)
+    return fns.mean(x, axis=axis, dtype=dtype)

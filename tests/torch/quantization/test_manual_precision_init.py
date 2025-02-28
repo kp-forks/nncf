@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -21,8 +21,8 @@ from nncf.common.quantization.structs import NonWeightQuantizerId
 from nncf.common.quantization.structs import WeightQuantizerId
 from nncf.torch import register_default_init_args
 from nncf.torch.quantization.algo import QuantizationController
-from tests.shared.paths import EXAMPLES_DIR
-from tests.shared.paths import TEST_ROOT
+from tests.cross_fw.shared.paths import EXAMPLES_DIR
+from tests.cross_fw.shared.paths import TEST_ROOT
 from tests.torch.helpers import BasicConvTestModel
 from tests.torch.helpers import create_compressed_model_and_algo_for_test
 from tests.torch.helpers import create_ones_mock_dataloader
@@ -158,10 +158,10 @@ class ManualSingleConvTestParams:
 
 MANUAL_SINGLE_CONV_TEST_PARAMS = [
     ManualSingleConvTestParams(name="manual_init_multiple_int8_qconfigs").for_device("CPU").num_bits_for_activation(8),
-    ManualSingleConvTestParams(name="manual_init_int4_sym_int8_asym").for_device("VPU").num_bits_for_activation(4),
+    ManualSingleConvTestParams(name="manual_init_int4_sym_int8_asym").for_device("NPU").num_bits_for_activation(4),
     ManualSingleConvTestParams(name="manual_init_trial").for_device("TRIAL").num_bits_for_activation(4),
     ManualSingleConvTestParams(name="incompatible_bitwidth")
-    .for_device("VPU")
+    .for_device("NPU")
     .num_bits_for_activation(2)
     .raises_error(),
 ]
@@ -178,7 +178,7 @@ def test_manual_single_conv(params):
             create_compressed_model_and_algo_for_test(model, config)
     else:
         model, ctrl = create_compressed_model_and_algo_for_test(model, config)
-        path_to_dot = "{}.dot".format(params.name)
+        path_to_dot = f"{params.name}.dot"
         graph_dir = os.path.join("quantized", "hawq")
         check_bitwidth_graph(ctrl, model, path_to_dot, graph_dir)
 
@@ -245,7 +245,7 @@ class PrecisionInitTestDesc:
     def check_precision_init(self, compression_ctrl: QuantizationController):
         for qid, quantizer in compression_ctrl.all_quantizations.items():
             expected_bit = [ref_bit for (ref_qid, ref_bit) in self.ref_bits if ref_qid == qid][0]
-            assert quantizer.num_bits == expected_bit, "Unexpected number of bits for {}".format(str(qid))
+            assert quantizer.num_bits == expected_bit, f"Unexpected number of bits for {str(qid)}"
 
         nncf_stats = compression_ctrl.statistics()
         actual_stats = nncf_stats.quantization

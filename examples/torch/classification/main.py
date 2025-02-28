@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -56,14 +56,12 @@ from examples.torch.common.optimizer import get_parameter_groups
 from examples.torch.common.optimizer import make_optimizer
 from examples.torch.common.utils import MockDataset
 from examples.torch.common.utils import NullContextManager
-from examples.torch.common.utils import SafeMLFLow
 from examples.torch.common.utils import configure_device
 from examples.torch.common.utils import configure_logging
 from examples.torch.common.utils import create_code_snapshot
 from examples.torch.common.utils import get_run_name
 from examples.torch.common.utils import is_pretrained_model_requested
 from examples.torch.common.utils import is_staged_quantization
-from examples.torch.common.utils import log_common_mlflow_params
 from examples.torch.common.utils import make_additional_checkpoints
 from examples.torch.common.utils import print_args
 from examples.torch.common.utils import write_metrics
@@ -145,7 +143,6 @@ def inception_criterion_fn(model_outputs: Any, target: Any, criterion: _Loss) ->
 
 def main_worker(current_gpu, config: SampleConfig):
     configure_device(current_gpu, config)
-    config.mlflow = SafeMLFLow(config)
     if is_main_process():
         configure_logging(logger, config)
         print_args(config)
@@ -235,8 +232,7 @@ def main_worker(current_gpu, config: SampleConfig):
         load_state(model, model_state_dict, is_resume=True)
 
     if is_export_only:
-        export_model(compression_ctrl, config.to_onnx, config.no_strip_on_export)
-        logger.info(f"Saved to {config.to_onnx}")
+        export_model(compression_ctrl, config)
         return
 
     model, _ = prepare_model_for_execution(model, config)
@@ -260,9 +256,7 @@ def main_worker(current_gpu, config: SampleConfig):
                 )
             )
         else:
-            logger.info("=> loaded checkpoint '{}'".format(resuming_checkpoint_path))
-
-    log_common_mlflow_params(config)
+            logger.info(f"=> loaded checkpoint '{resuming_checkpoint_path}'")
 
     if config.execution_mode != ExecutionMode.CPU_ONLY:
         cudnn.benchmark = True
@@ -325,11 +319,8 @@ def main_worker(current_gpu, config: SampleConfig):
         val_model = model
         validate(val_loader, val_model, criterion, config)
 
-    config.mlflow.end_run()
-
     if "export" in config.mode:
-        export_model(compression_ctrl, config.to_onnx, config.no_strip_on_export)
-        logger.info(f"Saved to {config.to_onnx}")
+        export_model(compression_ctrl, config)
 
 
 def train(
@@ -384,7 +375,6 @@ def train(
             if config.metrics_dump is not None:
                 acc = best_acc1 / 100
                 write_metrics(acc, config.metrics_dump)
-            config.mlflow.safe_call("log_metric", "best_acc1", best_acc1)
 
             checkpoint_path = osp.join(config.checkpoint_save_dir, get_run_name(config) + "_last.pth")
             checkpoint = {
@@ -401,8 +391,7 @@ def train(
             make_additional_checkpoints(checkpoint_path, is_best, epoch + 1, config)
 
             for key, value in prepare_for_tensorboard(statistics).items():
-                config.mlflow.safe_call("log_metric", "compression/statistics/{0}".format(key), value, epoch)
-                config.tb.add_scalar("compression/statistics/{0}".format(key), value, len(train_loader) * epoch)
+                config.tb.add_scalar(f"compression/statistics/{key}", value, len(train_loader) * epoch)
 
 
 def get_dataset(dataset_config, config, transform, is_train):
@@ -655,7 +644,7 @@ def train_epoch(
                     loss=losses,
                     top1=top1,
                     top5=top5,
-                    rank="{}:".format(config.rank) if config.multiprocessing_distributed else "",
+                    rank=f"{config.rank}:" if config.multiprocessing_distributed else "",
                 )
             )
 
@@ -670,7 +659,7 @@ def train_epoch(
 
             statistics = compression_ctrl.statistics(quickly_collected_only=True)
             for stat_name, stat_value in prepare_for_tensorboard(statistics).items():
-                config.tb.add_scalar("train/statistics/{}".format(stat_name), stat_value, i + global_step)
+                config.tb.add_scalar(f"train/statistics/{stat_name}", stat_value, i + global_step)
 
         if i >= train_iters:
             break
@@ -721,7 +710,7 @@ def validate(val_loader, model, criterion, config, epoch=0, log_validation_info=
                         loss=losses,
                         top1=top1,
                         top5=top5,
-                        rank="{}:".format(config.rank) if config.multiprocessing_distributed else "",
+                        rank=f"{config.rank}:" if config.multiprocessing_distributed else "",
                     )
                 )
 
@@ -729,11 +718,8 @@ def validate(val_loader, model, criterion, config, epoch=0, log_validation_info=
             config.tb.add_scalar("val/loss", losses.avg, len(val_loader) * epoch)
             config.tb.add_scalar("val/top1", top1.avg, len(val_loader) * epoch)
             config.tb.add_scalar("val/top5", top5.avg, len(val_loader) * epoch)
-            config.mlflow.safe_call("log_metric", "val/loss", float(losses.avg), epoch)
-            config.mlflow.safe_call("log_metric", "val/top1", float(top1.avg), epoch)
-            config.mlflow.safe_call("log_metric", "val/top5", float(top5.avg), epoch)
 
-            logger.info(" * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}\n".format(top1=top1, top5=top5))
+            logger.info(f" * Acc@1 {top1.avg:.3f} Acc@5 {top5.avg:.3f}\n")
 
         if is_main_process() and config.metrics_dump is not None:
             acc = top1.avg / 100

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -10,12 +10,11 @@
 # limitations under the License.
 
 import logging
-from typing import Dict
+from typing import Any, Dict
 
 import jsonschema
 
 from nncf.config.definitions import ALGO_NAME_VS_README_URL
-from nncf.config.definitions import BINARIZATION_ALGO_NAME_IN_CONFIG
 from nncf.config.definitions import CONST_SPARSITY_ALGO_NAME_IN_CONFIG
 from nncf.config.definitions import FILTER_PRUNING_ALGO_NAME_IN_CONFIG
 from nncf.config.definitions import KNOWLEDGE_DISTILLATION_ALGO_NAME_IN_CONFIG
@@ -25,7 +24,6 @@ from nncf.config.definitions import RB_SPARSITY_ALGO_NAME_IN_CONFIG
 from nncf.config.definitions import SCHEMA_VISUALIZATION_URL
 from nncf.config.schemata.accuracy_aware import ACCURACY_AWARE_MODES_VS_SCHEMA
 from nncf.config.schemata.accuracy_aware import ACCURACY_AWARE_TRAINING_SCHEMA
-from nncf.config.schemata.algo.binarization import BINARIZATION_SCHEMA
 from nncf.config.schemata.algo.const_sparsity import CONST_SPARSITY_SCHEMA
 from nncf.config.schemata.algo.filter_pruning import FILTER_PRUNING_SCHEMA
 from nncf.config.schemata.algo.knowledge_distillation import KNOWLEDGE_DISTILLATION_SCHEMA
@@ -50,7 +48,6 @@ REF_VS_ALGO_SCHEMA = {
     RB_SPARSITY_ALGO_NAME_IN_CONFIG: RB_SPARSITY_SCHEMA,
     KNOWLEDGE_DISTILLATION_ALGO_NAME_IN_CONFIG: KNOWLEDGE_DISTILLATION_SCHEMA,
     CONST_SPARSITY_ALGO_NAME_IN_CONFIG: CONST_SPARSITY_SCHEMA,
-    BINARIZATION_ALGO_NAME_IN_CONFIG: BINARIZATION_SCHEMA,
     **EXPERIMENTAL_REF_VS_ALGO_SCHEMA,
 }
 
@@ -78,7 +75,7 @@ SINGLE_INPUT_INFO_SCHEMA = {
     "additionalProperties": False,
 }
 
-TARGET_DEVICE_SCHEMA = {"type": "string", "enum": ["ANY", "CPU", "GPU", "VPU", "TRIAL", "CPU_SPR"]}
+TARGET_DEVICE_SCHEMA = {"type": "string", "enum": ["ANY", "CPU", "GPU", "NPU", "TRIAL", "CPU_SPR"]}
 
 
 NNCF_CONFIG_SCHEMA = {
@@ -151,14 +148,17 @@ NNCF_CONFIG_SCHEMA = {
 }
 
 
-def validate_single_compression_algo_schema(single_compression_algo_dict: Dict, ref_vs_algo_schema: Dict):
-    """single_compression_algo_dict must conform to BASIC_COMPRESSION_ALGO_SCHEMA (and possibly has other
-    algo-specific properties"""
+def validate_single_compression_algo_schema(
+    single_compression_algo_dict: Dict[str, Any], ref_vs_algo_schema: Dict[str, Any]
+) -> None:
+    """
+    single_compression_algo_dict must conform to BASIC_COMPRESSION_ALGO_SCHEMA (and possibly has other
+    algo-specific properties
+    """
     algo_name = single_compression_algo_dict["algorithm"]
     if algo_name not in ref_vs_algo_schema:
-        raise jsonschema.ValidationError(
-            f"Incorrect algorithm name - must be one of {str(list(ref_vs_algo_schema.keys()))}"
-        )
+        msg = f"Incorrect algorithm name - must be one of {str(list(ref_vs_algo_schema.keys()))}"
+        raise jsonschema.ValidationError(msg)
     try:
         jsonschema.validate(single_compression_algo_dict, schema=ref_vs_algo_schema[algo_name])
     except jsonschema.ValidationError as e:
@@ -175,18 +175,17 @@ def validate_single_compression_algo_schema(single_compression_algo_dict: Dict, 
         raise e
 
 
-def validate_accuracy_aware_training_schema(single_compression_algo_dict: Dict):
+def validate_accuracy_aware_training_schema(single_compression_algo_dict: Dict[str, Any]) -> None:
     """
     Checks accuracy_aware_training section.
     """
     jsonschema.validate(single_compression_algo_dict, schema=ACCURACY_AWARE_TRAINING_SCHEMA)
     accuracy_aware_mode = single_compression_algo_dict.get("mode")
     if accuracy_aware_mode not in ACCURACY_AWARE_MODES_VS_SCHEMA:
-        raise jsonschema.ValidationError(
-            "Incorrect Accuracy Aware mode - must be one of ({})".format(
-                ", ".join(ACCURACY_AWARE_MODES_VS_SCHEMA.keys())
-            )
+        msg = "Incorrect Accuracy Aware mode - must be one of ({})".format(
+            ", ".join(ACCURACY_AWARE_MODES_VS_SCHEMA.keys())
         )
+        raise jsonschema.ValidationError(msg)
     try:
         jsonschema.validate(single_compression_algo_dict, schema=ACCURACY_AWARE_MODES_VS_SCHEMA[accuracy_aware_mode])
     except Exception as e:

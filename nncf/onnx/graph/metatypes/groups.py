@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -10,6 +10,8 @@
 # limitations under the License.
 
 from nncf.onnx.graph.metatypes import onnx_metatypes
+from nncf.onnx.graph.metatypes.onnx_metatypes import ONNXOpWithWeightsMetatype
+from nncf.onnx.graph.metatypes.onnx_metatypes import get_operator_metatypes
 
 QUANTIZE_AGNOSTIC_OPERATIONS = [
     onnx_metatypes.ONNXGlobalMaxPoolMetatype,
@@ -67,14 +69,19 @@ INPUTS_QUANTIZABLE_OPERATIONS = [
     onnx_metatypes.ONNXMinimumMetatype,
 ]
 
-
 CONSTANT_WEIGHT_LAYER_METATYPES = [
-    onnx_metatypes.ONNXConvolutionMetatype,
-    onnx_metatypes.ONNXDepthwiseConvolutionMetatype,
-    onnx_metatypes.ONNXConvolutionTransposeMetatype,
-    onnx_metatypes.ONNXEmbeddingMetatype,
+    metatype
+    for metatype in get_operator_metatypes()
+    if issubclass(metatype, ONNXOpWithWeightsMetatype) and metatype.weight_port_ids
 ]
 
+POSSIBLE_WEIGHT_LAYER_METATYPES = [
+    metatype
+    for metatype in get_operator_metatypes()
+    if issubclass(metatype, ONNXOpWithWeightsMetatype) and metatype.possible_weight_ports
+]
+
+OPERATIONS_WITH_WEIGHTS = list(set().union(CONSTANT_WEIGHT_LAYER_METATYPES, POSSIBLE_WEIGHT_LAYER_METATYPES))
 
 LINEAR_OPERATIONS = [
     onnx_metatypes.ONNXConvolutionMetatype,
@@ -104,10 +111,24 @@ ARITHMETIC_OPERATIONS = [
     onnx_metatypes.ONNXDivLayerMetatype,
 ]
 
-
-OPERATIONS_WITH_WEIGHTS = [
-    *CONSTANT_WEIGHT_LAYER_METATYPES,
-    *MATMUL_METATYPES,
+ELEMENTWISE_OPERATIONS = [
+    onnx_metatypes.ONNXAddLayerMetatype,
+    onnx_metatypes.ONNXMulLayerMetatype,
+    onnx_metatypes.ONNXSubMetatype,
+    onnx_metatypes.ONNXDivLayerMetatype,
+    onnx_metatypes.ONNXLessMetatype,
+    onnx_metatypes.ONNXLessOrEqualMetatype,
+    onnx_metatypes.ONNXGreaterMetatype,
+    onnx_metatypes.ONNXGreaterOrEqualMetatype,
+    onnx_metatypes.ONNXEqualMetatype,
+    onnx_metatypes.ONNXModMetatype,
+    onnx_metatypes.ONNXOrMetatype,
+    onnx_metatypes.ONNXNotMetatype,
+    onnx_metatypes.ONNXAndMetatype,
+    onnx_metatypes.ONNXXOrMetatype,
+    onnx_metatypes.ONNXMaximumMetatype,
+    onnx_metatypes.ONNXMinimumMetatype,
+    onnx_metatypes.ONNXMeanMetatype,
 ]
 
 
@@ -117,7 +138,29 @@ BATCH_NORMALIZATION_OPERATIONS = [
 
 
 # Contains the operation metatypes for which bias can be applied.
-OPERATIONS_WITH_BIAS = [
+OPERATIONS_WITH_BIAS_REDUCED = [
     onnx_metatypes.ONNXConvolutionMetatype,
+    onnx_metatypes.ONNXGemmMetatype,
+    # TODO: Need to add MatMul with the separate bias support (CVS-135433)
+]
+
+OPERATIONS_WITH_BIAS = [
+    *OPERATIONS_WITH_BIAS_REDUCED,
     onnx_metatypes.ONNXDepthwiseConvolutionMetatype,
+    onnx_metatypes.ONNXConvolutionTransposeMetatype,
+]
+
+
+QUANTIZE_DEQUANTIZE_OPERATIONS = [
+    onnx_metatypes.ONNXQuantizeLinearMetatype,
+    onnx_metatypes.ONNXDequantizeLinearMetatype,
+]
+
+# These metatypes mix outputs for different samples into one axis.
+# If reducers and aggregators collect statistics at the output of the following operations,
+# assuming that 0-axis is batch axis, they get only 1 value instead of batch_size values.
+# It could lead to inaccurate/incorrect statistics result.
+OPERATIONS_OUTPUT_HAS_NO_BATCH_AXIS = [
+    onnx_metatypes.ONNXROIAlignMetatype,
+    onnx_metatypes.ONNXEmbeddingMetatype,
 ]

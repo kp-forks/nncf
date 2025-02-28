@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -32,4 +32,4 @@ class PTNNCFTensor(NNCFTensor):
         return self._tensor.device
 
     def is_empty(self) -> bool:
-        return self.tensor.size == 0
+        return self.tensor.numel() == 0

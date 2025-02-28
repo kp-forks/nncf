@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -21,6 +21,7 @@ from typing import Any, Dict, List, Tuple, TypeVar
 import torch
 from torch import nn
 
+import nncf
 from nncf.api.compression import CompressionLoss
 from nncf.common.compression import BaseCompressionAlgorithmBuilder
 from nncf.common.compression import BaseCompressionAlgorithmController
@@ -110,9 +111,8 @@ class PTCompressionAlgorithmBuilder(BaseCompressionAlgorithmBuilder):
 
     def __init__(self, config: NNCFConfig, should_init: bool = True):
         """
-        Arguments:
-          `config` - a dictionary that contains parameters of compression method
-          `should_init` - if False, trainable parameter initialization will be skipped during building
+        :param config: a dictionary that contains parameters of compression method
+        :param should_init: if False, trainable parameter initialization will be skipped during building
         """
         super().__init__(config, should_init)
         self.compressed_nncf_module_names = self._nncf_module_types_to_compress()
@@ -166,10 +166,11 @@ class PTCompressionAlgorithmBuilder(BaseCompressionAlgorithmBuilder):
         """
         ctrl = self._build_controller(model)
         if not isinstance(ctrl, PTCompressionAlgorithmController):
-            raise RuntimeError(
+            msg = (
                 "Internal error: builder must create controller inherited from "
                 "`PTCompressionAlgorithmController` class"
             )
+            raise nncf.InternalError(msg)
         ctrl.set_builder_state_with_name(self.name, self.get_state())
         return ctrl
 
@@ -195,9 +196,9 @@ class PTCompressionAlgorithmBuilder(BaseCompressionAlgorithmBuilder):
     def _handle_frozen_layers(self, target_model: NNCFNetwork):
         scopes_of_frozen_layers = []
         for weighted_node in target_model.nncf.get_weighted_original_graph_nodes():
-            if not weighted_node.layer_attributes.weight_requires_grad:
-                if self._should_consider_scope(weighted_node.node_name):
-                    scopes_of_frozen_layers.append(weighted_node.node_name)
+            should_be_considered = self._should_consider_scope(weighted_node.node_name)
+            if not weighted_node.layer_attributes.weight_requires_grad and should_be_considered:
+                scopes_of_frozen_layers.append(weighted_node.node_name)
         scopes_to_print = "\n".join(scopes_of_frozen_layers)
         if len(scopes_of_frozen_layers) > 0:
             is_allowed, reason = self._are_frozen_layers_allowed()
@@ -206,12 +207,13 @@ class PTCompressionAlgorithmBuilder(BaseCompressionAlgorithmBuilder):
                     f"{reason}, compressing them without tuning weights.\nFrozen layers:\n{scopes_to_print}"
                 )
             else:
-                raise RuntimeError(
+                msg = (
                     f"{reason}.\n"
                     f"Please unfreeze them or put into the Ignored Scope.\n"
                     f"Frozen Layers:\n"
                     f"{scopes_to_print}"
                 )
+                raise nncf.InternalError(msg)
 
     def _should_consider_scope(self, node_name: NNCFNodeName) -> bool:
         return should_consider_scope(node_name, self.ignored_scopes, self.target_scopes)

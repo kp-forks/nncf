@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -13,6 +13,7 @@ import numpy as np
 import openvino.runtime as ov
 import pytest
 
+import nncf
 from nncf.common.quantization.structs import QuantizationPreset
 from nncf.openvino.quantization.quantize_model import quantize_impl
 from nncf.parameters import TargetDevice
@@ -21,7 +22,8 @@ from tests.openvino.native.common import get_dataset_for_test
 from tests.openvino.native.models import ConvModel
 from tests.openvino.native.models import LinearModel
 from tests.openvino.native.models import MatMul2DModel
-from tests.openvino.native.test_model_transformer import get_fq_nodes
+from tests.openvino.native.models import WeightsModel
+from tests.openvino.native.test_model_transformer import get_nodes_by_type
 
 REF_FQ_NODES = [
     (("MatMul", 1), ["Input/fq_output_0"]),
@@ -44,9 +46,10 @@ def test_compress_weights(model_creator_func, ref_nodes):
         fast_bias_correction=True,
     )
 
-    fq_nodes = get_fq_nodes(quantized_model)
+    fq_nodes = get_nodes_by_type(quantized_model, type_name="FakeQuantize")
     assert len(fq_nodes) == len(ref_fqs_names)
-    for fq_name in fq_nodes:
+    for fq_node in fq_nodes:
+        fq_name = fq_node.get_friendly_name()
         assert fq_name in ref_fqs_names
 
     for op in quantized_model.get_ops():
@@ -72,9 +75,10 @@ def test_overflow_fix_applied(model_creator_func, ref_nodes):
         fast_bias_correction=True,
     )
 
-    fq_nodes = get_fq_nodes(quantized_model)
+    fq_nodes = get_nodes_by_type(quantized_model, type_name="FakeQuantize")
     assert len(fq_nodes) == len(ref_fqs_names)
-    for fq_name in fq_nodes:
+    for fq_node in fq_nodes:
+        fq_name = fq_node.get_friendly_name()
         assert fq_name in ref_fqs_names
 
     for op in quantized_model.get_ops():
@@ -101,9 +105,15 @@ def test_meta_information(model_creator_func, ignored_options):
             if isinstance(value, TargetDevice):
                 value = value.value
             if isinstance(value, IgnoredScope):
+                if value == IgnoredScope():
+                    check_parameters(quantized_model, {"ignored_scope": []}, path)
+                    continue
                 check_parameters(quantized_model, value.__dict__, rt_path)
                 continue
-            assert quantized_model.get_rt_info(rt_path) == str(value)
+            if "ignored_scope" in path and (not value or key == "validate"):
+                assert quantized_model.has_rt_info(rt_path) is False
+            else:
+                assert quantized_model.get_rt_info(rt_path) == str(value)
 
     model = model_creator_func().ov_model
     dataset = get_dataset_for_test(model)
@@ -120,3 +130,72 @@ def test_meta_information(model_creator_func, ignored_options):
     assert quantized_model.has_rt_info(base_path)
 
     check_parameters(quantized_model, quantize_parameters, base_path)
+
+
+@pytest.mark.parametrize(
+    "ignored_options, expected_dump",
+    [
+        (
+            IgnoredScope(names=["conv_weights_0", "conv_weights_1"]),
+            {
+                "validate": None,
+                "types": None,
+                "subgraphs": None,
+                "patterns": None,
+                "names": "['conv_weights_0', 'conv_weights_1']",
+            },
+        ),
+        (
+            IgnoredScope(
+                subgraphs=[
+                    nncf.Subgraph(
+                        inputs=[
+                            "MatMul_1",
+                        ],
+                        outputs=["MatMul"],
+                    )
+                ],
+            ),
+            {
+                "validate": None,
+                "types": None,
+                "subgraphs": "[{'inputs': ['MatMul_1'], 'outputs': ['MatMul']}]",
+                "patterns": None,
+                "names": None,
+            },
+        ),
+        (
+            IgnoredScope(names=["MatMul"], types=["Add"]),
+            {
+                "validate": None,
+                "types": "['Add']",
+                "subgraphs": None,
+                "patterns": None,
+                "names": "['MatMul']",
+            },
+        ),
+        (IgnoredScope(), {"": "[]"}),
+    ],
+)
+def test_ignored_scope_dump(ignored_options, expected_dump, tmp_path):
+    ignored_scope_path = ["nncf", "quantization", "ignored_scope"]
+
+    model = WeightsModel().ov_model
+    dataset = get_dataset_for_test(model)
+    quantize_parameters = {
+        "preset": QuantizationPreset.PERFORMANCE,
+        "target_device": TargetDevice.CPU,
+        "subset_size": 1,
+        "fast_bias_correction": True,
+        "ignored_scope": ignored_options,
+    }
+    quantized_model = quantize_impl(model, dataset, **quantize_parameters)
+    ov.save_model(quantized_model, tmp_path / "ov_model.xml")
+    core = ov.Core()
+    dumped_model = core.read_model(tmp_path / "ov_model.xml")
+    for key, value in expected_dump.items():
+        rt_path = ignored_scope_path + [key] if key else ignored_scope_path
+        if value:
+            assert dumped_model.get_rt_info(rt_path) == value
+        else:
+            assert dumped_model.has_rt_info(rt_path) is False

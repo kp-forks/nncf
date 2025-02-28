@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -20,7 +20,7 @@ from torch import nn
 from nncf import NNCFConfig
 from nncf.common.quantization.structs import QuantizerConfig
 from nncf.torch.quantization.algo import QuantizationController
-from tests.shared.paths import TEST_ROOT
+from tests.cross_fw.shared.paths import TEST_ROOT
 from tests.torch.sample_test_validator import SampleType
 from tests.torch.sample_test_validator import SanitySampleValidator
 from tests.torch.sample_test_validator import SanityTestCaseDescriptor
@@ -69,10 +69,6 @@ class PrecisionSampleValidator(SanitySampleValidator):
     def setup_spy(self, mocker):
         train_location = self._sample_handler.get_train_location()
         self._train_mock = mocker.patch(train_location)
-
-        # Need to mock SafeMLFLow to prevent starting a not closed mlflow session due to memory leak of config and
-        # SafeMLFLow, which happens with a mocked train function
-        self._sample_handler.mock_mlflow(mocker)
 
     def validate_spy(self):
         self._train_mock.assert_called_once()
@@ -363,7 +359,7 @@ def fixture_export_desc(request):
 def test_export_behavior(export_desc: PrecisionTestCaseDescriptor, tmp_path, mocker, extra_args, is_export_called):
     validator = export_desc.get_validator()
     args = validator.get_default_args(tmp_path)
-    args["--to-onnx"] = tmp_path / "model.onnx"
+    args["--export-model-path"] = tmp_path / "model.onnx"
     if extra_args is not None:
         args.update(extra_args)
     validator.is_export_called = is_export_called

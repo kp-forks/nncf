@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -13,6 +13,7 @@ from abc import ABC
 from abc import abstractmethod
 from typing import Any, List, Optional, TypeVar
 
+from nncf.common.engine import Engine
 from nncf.common.graph.graph import NNCFGraph
 from nncf.common.graph.graph import NNCFNode
 from nncf.common.graph.operator_metatypes import OperatorMetatype
@@ -21,8 +22,48 @@ TModel = TypeVar("TModel")
 TPModel = TypeVar("TPModel")
 
 
+class PreparedModel(ABC):
+    @property
+    @abstractmethod
+    def model_for_inference(self) -> TPModel:
+        """
+        Returns prepared model for inference.
+
+        :return: Prepared model for inference.
+        """
+
+    @property
+    @abstractmethod
+    def engine(self) -> Engine:
+        """
+        Returns the engine for inference the prepared model.
+
+        :return: The engine for inference the prepared model.
+        """
+
+    def __call__(self, input_data: Any) -> Any:
+        """
+        Runs model on the provided input data and returns the raw model outputs.
+
+        :param input_data: inputs for the model
+        :return: raw model outputs
+        """
+        return self.engine.infer(input_data)
+
+
 class AccuracyControlAlgoBackend(ABC):
     # Metatypes
+
+    @staticmethod
+    @abstractmethod
+    def get_op_with_weights_metatypes() -> List[OperatorMetatype]:
+        """
+        Returns a list of operation metatypes that can be reverted to representation
+        with int8 weights.
+
+        :return: The list of operation metatypes that can be reverted to representation
+            with int8 weights.
+        """
 
     @staticmethod
     @abstractmethod
@@ -49,6 +90,16 @@ class AccuracyControlAlgoBackend(ABC):
         Returns a list of metatypes for operations that may be quantized.
 
         :return: The list of metatypes for operations that may be quantized.
+        """
+
+    @staticmethod
+    @abstractmethod
+    def get_start_nodes_for_activation_path_tracing(nncf_graph: NNCFGraph) -> List[NNCFNode]:
+        """
+        Returns a list of NNCFNodes to use as start nodes for activation path tracing.
+
+        :param nncf_graph: NNCFGraph to get the start nodes.
+        :return: List of NNCFNodes to use as start nodes for activation path tracing.
         """
 
     @staticmethod
@@ -91,7 +142,7 @@ class AccuracyControlAlgoBackend(ABC):
 
         :param node: The node to check.
         :param nncf_graph: The NNCF graph.
-        :return: True` if `node` corresponds to the operation with weights, `False` otherwise.
+        :return: `True` if `node` corresponds to the operation with weights, `False` otherwise.
         """
 
     @staticmethod
@@ -136,16 +187,4 @@ class AccuracyControlAlgoBackend(ABC):
 
         :param model: A model
         :return: Model size (in bytes)
-        """
-
-    # Preparation of model
-
-    @staticmethod
-    @abstractmethod
-    def prepare_for_inference(model: TModel) -> TPModel:
-        """
-        Prepares model for inference.
-
-        :param model: A model that should be prepared.
-        :return: Prepared model for inference.
         """

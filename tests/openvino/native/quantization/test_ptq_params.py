@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -9,33 +9,35 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import numpy as np
 import pytest
 
+from nncf.common.graph.graph import NNCFGraph
 from nncf.common.graph.patterns import GraphPattern
 from nncf.common.graph.patterns.manager import PatternsManager
 from nncf.common.graph.transformations.commands import TargetType
+from nncf.common.graph.transformations.commands import TransformationType
 from nncf.common.hardware.config import HW_CONFIG_TYPE_TARGET_DEVICE_MAP
 from nncf.common.utils.backend import BackendType
-from nncf.experimental.common.tensor_statistics.collectors import MaxAggregator
-from nncf.experimental.common.tensor_statistics.collectors import MeanAggregator
-from nncf.experimental.common.tensor_statistics.collectors import MinAggregator
-from nncf.experimental.common.tensor_statistics.collectors import TensorCollector
+from nncf.openvino.graph.metatypes.openvino_metatypes import OVConcatMetatype
 from nncf.openvino.graph.metatypes.openvino_metatypes import OVConvolutionMetatype
 from nncf.openvino.graph.metatypes.openvino_metatypes import OVMatMulMetatype
 from nncf.openvino.graph.metatypes.openvino_metatypes import OVSoftmaxMetatype
 from nncf.openvino.graph.nncf_graph_builder import GraphConverter
+from nncf.openvino.graph.transformations.commands import OVQuantizerInsertionCommand
 from nncf.openvino.graph.transformations.commands import OVTargetPoint
 from nncf.parameters import TargetDevice
 from nncf.quantization.algorithms.min_max.algorithm import MinMaxQuantization
 from nncf.quantization.algorithms.min_max.openvino_backend import OVMinMaxAlgoBackend
 from nncf.scopes import IgnoredScope
+from tests.common.quantization.metatypes import CatTestMetatype
 from tests.common.quantization.metatypes import Conv2dTestMetatype
 from tests.common.quantization.metatypes import LinearTestMetatype
 from tests.common.quantization.metatypes import SoftmaxTestMetatype
+from tests.cross_fw.test_templates.models import NNCFGraphToTestMatMul
+from tests.cross_fw.test_templates.test_ptq_params import TemplateTestPTQParams
 from tests.openvino.native.models import DepthwiseConv4DModel
 from tests.openvino.native.models import LinearModel
-from tests.post_training.test_templates.models import NNCFGraphToTestMatMul
-from tests.post_training.test_templates.test_ptq_params import TemplateTestPTQParams
 
 
 def get_hw_patterns(device: TargetDevice = TargetDevice.ANY) -> GraphPattern:
@@ -46,7 +48,7 @@ def get_ignored_patterns(device: TargetDevice = TargetDevice.ANY) -> GraphPatter
     return PatternsManager.get_full_ignored_pattern_graph(backend=BackendType.OPENVINO, device=device)
 
 
-@pytest.mark.parametrize("target_device", [TargetDevice.CPU, TargetDevice.GPU, TargetDevice.VPU])
+@pytest.mark.parametrize("target_device", [TargetDevice.CPU, TargetDevice.GPU, TargetDevice.NPU])
 def test_target_device(target_device):
     min_max_algo = MinMaxQuantization(target_device=target_device)
     min_max_algo._backend_entity = OVMinMaxAlgoBackend()
@@ -57,18 +59,6 @@ class TestPTQParams(TemplateTestPTQParams):
     def get_algo_backend(self):
         return OVMinMaxAlgoBackend()
 
-    def check_is_min_max_statistic_collector(self, tensor_collector: TensorCollector):
-        aggrs = [aggr.__class__ for aggr in tensor_collector.aggregators.values()]
-        assert len(aggrs) == 2
-        assert MinAggregator in aggrs
-        assert MaxAggregator in aggrs
-
-    def check_is_mean_min_max_statistic_collector(self, tensor_collector: TensorCollector):
-        aggrs = [aggr.__class__ for aggr in tensor_collector.aggregators.values()]
-        assert len(aggrs) == 2
-        assert MeanAggregator in aggrs
-        assert aggrs[0].__class__ == aggrs[1].__class__
-
     def check_quantize_outputs_fq_num(self, quantize_outputs, act_num_q, weight_num_q):
         if quantize_outputs:
             assert act_num_q == 3
@@ -76,8 +66,20 @@ class TestPTQParams(TemplateTestPTQParams):
             assert act_num_q == 1
         assert weight_num_q == 1
 
+    def check_unified_scale_layout(self, layout, unified_scale_group):
+        assert len(layout.transformations) == len(unified_scale_group)
+        for t, ref_tp in zip(layout.transformations, unified_scale_group):
+            assert isinstance(t, OVQuantizerInsertionCommand)
+            assert t.target_point == ref_tp
+            assert t.type == TransformationType.INSERT
+            assert np.isclose(t.quantizer_parameters.input_low.data, -4.031496)
+            assert np.isclose(t.quantizer_parameters.input_high.data, 4)
+
     def target_point(self, target_type: TargetType, target_node_name: str, port_id: int) -> OVTargetPoint:
         return OVTargetPoint(target_type, target_node_name, port_id)
+
+    def get_backend_tensor(self, value):
+        return np.array(value)
 
     @property
     def metatypes_mapping(self):
@@ -85,7 +87,12 @@ class TestPTQParams(TemplateTestPTQParams):
             Conv2dTestMetatype: OVConvolutionMetatype,
             LinearTestMetatype: OVMatMulMetatype,
             SoftmaxTestMetatype: OVSoftmaxMetatype,
+            CatTestMetatype: OVConcatMetatype,
         }
+
+    @property
+    def nncf_graph_cls(self):
+        return NNCFGraph
 
     @pytest.fixture(scope="session")
     def test_params(self):
@@ -129,7 +136,7 @@ class TestPTQParams(TemplateTestPTQParams):
     @pytest.fixture(
         params=[
             (IgnoredScope(), 1, 1),
-            (IgnoredScope(["MatMul"]), 1, 0),
+            (IgnoredScope(["MatMul"]), 0, 0),
             (IgnoredScope(["Add"]), 1, 1),
             (IgnoredScope(["MatMul", "Add"]), 0, 0),
         ]

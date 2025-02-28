@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -11,7 +11,7 @@
 
 from abc import abstractmethod
 from dataclasses import dataclass
-from typing import Any, Optional, Tuple, TypeVar
+from typing import Any, Tuple, TypeVar
 
 import numpy as np
 
@@ -110,14 +110,11 @@ class ChannelAlignmentAlgoBackend:
 
     @staticmethod
     @abstractmethod
-    def is_node_with_bias(node: NNCFNode, nncf_graph: NNCFGraph) -> bool:
+    def get_conv_layer_attributes(node: NNCFNode) -> ConvolutionLayerAttributes:
         """
-        Checks if the node has a bias or not.
-
-        :param node: The node to check.
-        :param nncf_graph: The NNCF graph.
-        :return: True` if `node` corresponds to the operation with bias
-            (bias is added to the output tensor of that operation), `False` otherwise.
+        Returns convolutional layer attributes of given node if they are present and None otherwise.
+        :param node: NNCFNode to take convolutional layer attributes from.
+        :return: Convolutional layer attributes of given node if they are present and None otherwise
         """
 
     @staticmethod
@@ -133,12 +130,14 @@ class ChannelAlignmentAlgoBackend:
 
     @staticmethod
     @abstractmethod
-    def get_conv_layer_attributes(node: NNCFNode) -> Optional[ConvolutionLayerAttributes]:
+    def is_node_with_bias(node: NNCFNode, nncf_graph: NNCFGraph) -> bool:
         """
-        Returns convolutional layer attributes of given node if they are present and None otherwise.
+        Checks if the node has a bias or not.
 
-        :param node: NNCFNode to take convolutional layer attributes from.
-        :return: Convolutional layer attributes of given node if they are present and None otherwise
+        :param node: The node to check.
+        :param nncf_graph: The NNCF graph.
+        :return: True` if `node` corresponds to the operation with bias
+            (bias is added to the output tensor of that operation), `False` otherwise.
         """
 
     @staticmethod

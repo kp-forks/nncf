@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -17,6 +17,7 @@ from typing import Dict, List, Tuple, Union
 import numpy as np
 import torch
 
+import nncf
 from nncf import NNCFConfig
 from nncf.api.compression import CompressionLoss
 from nncf.api.compression import CompressionStage
@@ -46,15 +47,15 @@ from nncf.common.utils.os import safe_open
 from nncf.config.extractors import extract_bn_adaptation_init_params
 from nncf.torch.algo_selector import PT_COMPRESSION_ALGORITHMS
 from nncf.torch.compression_method_api import PTCompressionAlgorithmController
-from nncf.torch.graph.operator_metatypes import PTDepthwiseConv1dSubtype
-from nncf.torch.graph.operator_metatypes import PTDepthwiseConv2dSubtype
-from nncf.torch.graph.operator_metatypes import PTDepthwiseConv3dSubtype
 from nncf.torch.graph.operator_metatypes import PTModuleConv1dMetatype
 from nncf.torch.graph.operator_metatypes import PTModuleConv2dMetatype
 from nncf.torch.graph.operator_metatypes import PTModuleConv3dMetatype
 from nncf.torch.graph.operator_metatypes import PTModuleConvTranspose1dMetatype
 from nncf.torch.graph.operator_metatypes import PTModuleConvTranspose2dMetatype
 from nncf.torch.graph.operator_metatypes import PTModuleConvTranspose3dMetatype
+from nncf.torch.graph.operator_metatypes import PTModuleDepthwiseConv1dSubtype
+from nncf.torch.graph.operator_metatypes import PTModuleDepthwiseConv2dSubtype
+from nncf.torch.graph.operator_metatypes import PTModuleDepthwiseConv3dSubtype
 from nncf.torch.graph.operator_metatypes import PTModuleLinearMetatype
 from nncf.torch.layers import NNCF_PRUNING_MODULES_DICT
 from nncf.torch.nncf_network import NNCFNetwork
@@ -79,11 +80,11 @@ from nncf.torch.utils import get_filters_num
 
 GENERAL_CONV_LAYER_METATYPES = [
     PTModuleConv1dMetatype,
-    PTDepthwiseConv1dSubtype,
+    PTModuleDepthwiseConv1dSubtype,
     PTModuleConv2dMetatype,
-    PTDepthwiseConv2dSubtype,
+    PTModuleDepthwiseConv2dSubtype,
     PTModuleConv3dMetatype,
-    PTDepthwiseConv3dSubtype,
+    PTModuleDepthwiseConv3dSubtype,
     PTModuleConvTranspose1dMetatype,
     PTModuleConvTranspose2dMetatype,
     PTModuleConvTranspose3dMetatype,
@@ -184,17 +185,19 @@ class FilterPruningController(BasePruningAlgoController):
                     with safe_open(Path(coeffs_path), "r", encoding="utf8") as coeffs_file:
                         loaded_coeffs = json.load(coeffs_file)
                 except (ValueError, FileNotFoundError) as err:
-                    raise Exception(
+                    msg = (
                         "Can't load json with ranking coefficients. Please, check format of json file "
                         "and path to the file."
-                    ) from err
+                    )
+                    raise Exception(msg) from err
                 ranking_coeffs = {key: tuple(loaded_coeffs[key]) for key in loaded_coeffs}
                 nncf_logger.debug(f"Loaded ranking coefficients = {ranking_coeffs}")
                 self.ranking_coeffs = ranking_coeffs
             else:
                 # Ranking can't be trained without registered init struct LeGRInitArgs
                 if not config.has_extra_struct(LeGRInitArgs):
-                    raise Exception("Please, register LeGRInitArgs via register_default_init_args function.")
+                    msg = "Please, register LeGRInitArgs via register_default_init_args function."
+                    raise Exception(msg)
                 # Wrapping model for parallelization
                 distributed_wrapping_init_args = config.get_extra_struct(DistributedCallbacksArgs)
                 target_model = distributed_wrapping_init_args.wrap_model(target_model)
@@ -352,17 +355,15 @@ class FilterPruningController(BasePruningAlgoController):
             self.current_flops = flops
             self.current_params_num = params_num
             return right
-        raise RuntimeError(
-            "Can't prune the model to get the required "
-            "pruning level in flops = {}".format(target_flops_pruning_level)
-        )
+        msg = f"Can't prune the model to get the required pruning level in flops = {target_flops_pruning_level}"
+        raise nncf.InternalError(msg)
 
     def set_pruning_level(
         self, pruning_level: Union[float, Dict[int, float]], run_batchnorm_adaptation: bool = False
     ) -> None:
         """
         Set the global or groupwise pruning level in the model.
-        If pruning_level is a float, the correspoding global pruning level is set in the model,
+        If pruning_level is a float, the corresponding global pruning level is set in the model,
         either in terms of the percentage of filters pruned or as the percentage of flops
         removed, the latter being true in case the "prune_flops" flag of the controller is
         set to True.
@@ -377,7 +378,8 @@ class FilterPruningController(BasePruningAlgoController):
             with torch.no_grad():
                 if self.all_weights:
                     if groupwise_pruning_levels_set:
-                        raise RuntimeError("Cannot set group-wise pruning levels with all_weights=True")
+                        msg = "Cannot set group-wise pruning levels with all_weights=True"
+                        raise nncf.InternalError(msg)
                     # Non-uniform (global) importance-score-based pruning according
                     # to the global pruning level
                     if self.prune_flops:
@@ -388,7 +390,8 @@ class FilterPruningController(BasePruningAlgoController):
                     if groupwise_pruning_levels_set:
                         group_ids = [group.id for group in self.pruned_module_groups_info.get_all_clusters()]
                         if set(pruning_level.keys()) != set(group_ids):
-                            raise RuntimeError("Groupwise pruning level dict keys do not correspond to layer group ids")
+                            msg = "Groupwise pruning level dict keys do not correspond to layer group ids"
+                            raise nncf.InternalError(msg)
                     else:
                         # Pruning uniformly with the same pruning level across layers
                         if self.prune_flops:
@@ -454,6 +457,8 @@ class FilterPruningController(BasePruningAlgoController):
             num_of_sparse_elems = get_rounded_pruned_element_number(
                 cumulative_filters_importance.size(0), group_pruning_level
             )
+            if num_of_sparse_elems == 0:
+                nncf_logger.warning("Binary masks are identity matrix, please check your config.")
             threshold = sorted(cumulative_filters_importance)[min(num_of_sparse_elems, filters_num[0] - 1)]
             mask = calculate_binary_mask(cumulative_filters_importance, threshold)
 
@@ -592,7 +597,8 @@ class FilterPruningController(BasePruningAlgoController):
                 self.current_params_num = params_num
                 return
             cur_num += 1
-        raise RuntimeError("Can't prune model to asked flops pruning level")
+        msg = "Can't prune model to asked flops pruning level"
+        raise nncf.InternalError(msg)
 
     def _propagate_masks(self):
         nncf_logger.debug("Propagating pruning masks")
@@ -617,11 +623,11 @@ class FilterPruningController(BasePruningAlgoController):
         self._propagate_masks()
 
         pruned_layers_stats = self.get_stats_for_pruned_modules()
-        nncf_logger.info(f"Pruned layers statistics: \n{pruned_layers_stats.draw()}")
+        nncf_logger.info(f"Pruned layers statistics: \n{pruned_layers_stats}")
 
     def compression_stage(self) -> CompressionStage:
         target_pruning_level = self.scheduler.target_level
-        actual_pruning_level = self._pruning_level
+        actual_pruning_level = self.compression_rate
         if actual_pruning_level == 0:
             return CompressionStage.UNCOMPRESSED
         if (

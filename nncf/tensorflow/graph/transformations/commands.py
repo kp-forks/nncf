@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -392,7 +392,36 @@ class TFOperationWithWeights(TFLayerWeight):
         return cls(**state)
 
 
-class TFInsertionCommand(TransformationCommand):
+class TFTransformationCommand(TransformationCommand):
+    """
+    The base class for all Tensorflow transformation commands.
+    """
+
+    def __init__(self, command_type: TransformationType, target_point: TargetPoint):
+        """
+        Constructor.
+
+        :param command_type: Type of the transformation command.
+        :param target_point: Target point, the object or spot in the model graph
+            to which the transformation command will be applied.
+        """
+        super().__init__(command_type, target_point)
+
+    def check_command_compatibility(self, command: "TFTransformationCommand") -> bool:
+        return (
+            isinstance(command, TFTransformationCommand)
+            and self.type == command.type
+            and self.target_point == command.target_point
+        )
+
+    def union(self, other: "TFTransformationCommand") -> "TFTransformationCommand":
+        raise NotImplementedError()
+
+    def __add__(self, other: "TFTransformationCommand") -> "TFTransformationCommand":
+        return self.union(other)
+
+
+class TFInsertionCommand(TFTransformationCommand):
     """
     Inserts objects at the target point in the TensorFlow model graph.
     """
@@ -413,15 +442,17 @@ class TFInsertionCommand(TransformationCommand):
     def insertion_objects(self) -> List[Callable]:
         return [x for x, _ in self.callable_objects]
 
-    def union(self, other: TransformationCommand) -> "TFInsertionCommand":
+    def union(self, other: TFTransformationCommand) -> "TFInsertionCommand":
         if isinstance(self.target_point, TFMultiLayerPoint):
-            raise NotImplementedError(
+            msg = (
                 "A command of TFInsertionCommand type with TFMultiLayerPoint "
                 "could not be united with another command"
             )
+            raise NotImplementedError(msg)
 
         if not self.check_command_compatibility(other):
-            raise ValueError("{} and {} commands could not be united".format(type(self).__name__, type(other).__name__))
+            msg = f"{type(self).__name__} and {type(other).__name__} commands could not be united"
+            raise ValueError(msg)
 
         com = TFInsertionCommand(self.target_point)
         com.callable_objects = self.callable_objects + other.callable_objects
@@ -429,7 +460,7 @@ class TFInsertionCommand(TransformationCommand):
         return com
 
 
-class TFRemovalCommand(TransformationCommand):
+class TFRemovalCommand(TFTransformationCommand):
     """
     Removes the target object.
     """
@@ -437,11 +468,12 @@ class TFRemovalCommand(TransformationCommand):
     def __init__(self, target_point: TargetPoint):
         super().__init__(TransformationType.REMOVE, target_point)
 
-    def union(self, other: TransformationCommand) -> "TFRemovalCommand":
-        raise NotImplementedError("A command of TFRemovalCommand type could not be united with another command")
+    def union(self, other: TFTransformationCommand) -> "TFRemovalCommand":
+        msg = "A command of TFRemovalCommand type could not be united with another command"
+        raise NotImplementedError(msg)
 
 
-class TFMultipleInsertionCommands(TransformationCommand):
+class TFMultipleInsertionCommands(TFTransformationCommand):
     """
     A list of insertion commands combined by a common global target point but
     with different target points in between.
@@ -455,7 +487,7 @@ class TFMultipleInsertionCommands(TransformationCommand):
         self,
         target_point: TargetPoint,
         check_target_points_fn: Optional[Callable] = None,
-        commands: Optional[List[TransformationCommand]] = None,
+        commands: Optional[List[TFTransformationCommand]] = None,
     ):
         super().__init__(TransformationType.MULTI_INSERT, target_point)
         self.check_target_points_fn = check_target_points_fn
@@ -467,21 +499,22 @@ class TFMultipleInsertionCommands(TransformationCommand):
                 self.add_insertion_command(cmd)
 
     @property
-    def commands(self) -> List[TransformationCommand]:
+    def commands(self) -> List[TFTransformationCommand]:
         return self._commands
 
-    def check_insertion_command(self, command: TransformationCommand) -> bool:
+    def check_insertion_command(self, command: TFTransformationCommand) -> bool:
         if (
-            isinstance(command, TransformationCommand)
+            isinstance(command, TFTransformationCommand)
             and command.type == TransformationType.INSERT
             and self.check_target_points_fn(self.target_point, command.target_point)
         ):
             return True
         return False
 
-    def add_insertion_command(self, command: TransformationCommand) -> None:
+    def add_insertion_command(self, command: TFTransformationCommand) -> None:
         if not self.check_insertion_command(command):
-            raise ValueError("{} command could not be added".format(type(command).__name__))
+            msg = f"{type(command).__name__} command could not be added"
+            raise ValueError(msg)
 
         for idx, cmd in enumerate(self.commands):
             if cmd.target_point == command.target_point:
@@ -490,9 +523,10 @@ class TFMultipleInsertionCommands(TransformationCommand):
         else:
             self.commands.append(command)
 
-    def union(self, other: TransformationCommand) -> "TFMultipleInsertionCommands":
+    def union(self, other: TFTransformationCommand) -> "TFMultipleInsertionCommands":
         if not self.check_command_compatibility(other):
-            raise ValueError("{} and {} commands could not be united".format(type(self).__name__, type(other).__name__))
+            msg = f"{type(self).__name__} and {type(other).__name__} commands could not be united"
+            raise ValueError(msg)
 
         def make_check_target_points_fn(fn1, fn2):
             def check_target_points(tp0, tp1):

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -18,6 +18,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import torch
 from torch import nn
 
+import nncf
 from nncf.common.graph import NNCFNodeName
 from nncf.common.graph.layer_attributes import BaseLayerAttributes
 from nncf.common.graph.layer_attributes import ConvolutionLayerAttributes
@@ -26,6 +27,7 @@ from nncf.common.graph.layer_attributes import LinearLayerAttributes
 from nncf.common.graph.transformations.commands import TargetType
 from nncf.common.graph.transformations.commands import TransformationCommand
 from nncf.common.graph.transformations.commands import TransformationPriority
+from nncf.common.graph.utils import get_num_filters_legacy
 from nncf.common.logging import nncf_logger
 from nncf.common.pruning.clusterization import Cluster
 from nncf.common.pruning.clusterization import Clusterization
@@ -47,9 +49,9 @@ from nncf.experimental.torch.nas.bootstrapNAS.elasticity.base_handler import Sin
 from nncf.experimental.torch.nas.bootstrapNAS.elasticity.elasticity_dim import ElasticityDim
 from nncf.experimental.torch.nas.bootstrapNAS.elasticity.filter_reorder import FilterReorderingAlgorithm
 from nncf.torch.graph.graph import PTNNCFGraph
-from nncf.torch.graph.operator_metatypes import PTDepthwiseConv2dSubtype
 from nncf.torch.graph.operator_metatypes import PTModuleBatchNormMetatype
 from nncf.torch.graph.operator_metatypes import PTModuleConv2dMetatype
+from nncf.torch.graph.operator_metatypes import PTModuleDepthwiseConv2dSubtype
 from nncf.torch.graph.operator_metatypes import PTModuleLayerNormMetatype
 from nncf.torch.graph.operator_metatypes import PTModuleLinearMetatype
 from nncf.torch.graph.transformations.commands import PTInsertionCommand
@@ -127,11 +129,11 @@ class ElasticWidthOp:
         :param width: number of channels
         """
         if width is None or width > self._max_width or width < 1:
-            raise AttributeError(
-                "Invalid width={} in scope={}.\nIt should be within the range: [1, {}]".format(
-                    width, self._node_name, self._max_width
-                )
+            msg = (
+                f"Invalid width={width} in scope={self._node_name}.\n"
+                f"It should be within the range: [1, {self._max_width}]"
             )
+            raise AttributeError(msg)
 
         self._active_width = width
 
@@ -281,11 +283,11 @@ class ElasticOutputWidthOp(ElasticWidthOp):
         if fixed_width_list:
             fixed_width_list.sort(reverse=True)
             if fixed_width_list[0] > max_width:
-                raise RuntimeError(
-                    f"Width list for {node_name} contains invalid values: {fixed_width_list}, {max_width}"
-                )
+                msg = f"Width list for {node_name} contains invalid values: {fixed_width_list}, {max_width}"
+                raise nncf.InternalError(msg)
             if fixed_width_list[0] != max_width:
-                raise RuntimeError(f"Max width for {node_name} is not aligned with pre-trained model")
+                msg = f"Max width for {node_name} is not aligned with pre-trained model"
+                raise nncf.ValidationError(msg)
             self._width_list = fixed_width_list
         else:
             self._width_list = self._generate_width_list(self._max_width, params)
@@ -293,7 +295,7 @@ class ElasticOutputWidthOp(ElasticWidthOp):
     @property
     def width_list(self) -> List[int]:
         """
-        list of all available widths to select from. Each value corresponds to a single element in the search space of
+        List of all available widths to select from. Each value corresponds to a single element in the search space of
         operation. The search space of the model is cartesian product of search spaces of operation.
         If all widths starting from 1 to maximum number of channels with step size 1 are available, the search space
         would be prohibitively large to efficiently train and search.
@@ -314,10 +316,11 @@ class ElasticOutputWidthOp(ElasticWidthOp):
         :param width: number of output channels
         """
         if width not in self.width_list and width != self.max_width:
-            raise ValueError(
+            msg = (
                 f"Invalid number of output channels to set: {width} in scope={self._node_name}. "
                 f"Should be a number in {self.width_list}"
             )
+            raise ValueError(msg)
         super().set_active_width(width)
 
     @staticmethod
@@ -359,7 +362,8 @@ class ElasticOutputWidthOp(ElasticWidthOp):
                 if p.max_num_widths == len(width_list):
                     break
                 if 0 >= multiplier > 1:
-                    raise RuntimeError(f"Wrong value for multiplier: {multiplier}")
+                    msg = f"Wrong value for multiplier: {multiplier}"
+                    raise nncf.InternalError(msg)
                 w = int(max_width * multiplier)
                 w = w - (w % ALIGNMENT_CONSTANT_FOR_MULTIPLIERS)
                 w = max(w, p.min_width)
@@ -529,7 +533,7 @@ class ElasticWidthHandler(SingleElasticityHandler):
         external_importance_path: Optional[str],
         weights_normalizer_fn: Optional[Callable[[torch.Tensor], torch.Tensor]],
         node_name_vs_dynamic_input_width_op_map: Dict[NNCFNodeName, ElasticWidthOp],
-        pruned_module_groups_info: Clusterization[ElasticWidthInfo](id_fn=lambda x: x.node_name),
+        pruned_module_groups_info: Clusterization[ElasticWidthInfo],
         transformation_commands: List[TransformationCommand],
         add_dynamic_inputs: Optional[List[str]] = None,
     ):
@@ -553,7 +557,7 @@ class ElasticWidthHandler(SingleElasticityHandler):
         self._filter_importance_fn = filter_importance_fn
         self._external_importance = None
         if external_importance_path is not None:
-            self._external_importance = torch.load(external_importance_path)
+            self._external_importance = torch.load(external_importance_path, weights_only=False)
             nncf_logger.debug("Loaded custom external weight importance.")
         self._weights_normalizer_fn = weights_normalizer_fn
         self._add_dynamic_inputs = add_dynamic_inputs
@@ -578,7 +582,8 @@ class ElasticWidthHandler(SingleElasticityHandler):
     @width_num_params_indicator.setter
     def width_num_params_indicator(self, width_num_params_indicator):
         if width_num_params_indicator == 0 or width_num_params_indicator < -1:
-            raise RuntimeError(f"Invalid width indicator: {width_num_params_indicator}")
+            msg = f"Invalid width indicator: {width_num_params_indicator}"
+            raise nncf.InternalError(msg)
         self._width_num_params_indicator = width_num_params_indicator
 
     @property
@@ -709,35 +714,34 @@ class ElasticWidthHandler(SingleElasticityHandler):
             if not was_set and node_name not in names_of_processed_nodes:
                 nncf_logger.debug(f"input width was not set in scope={node.node_name}")
 
-            if self._add_dynamic_inputs:
-                if node_name in self._add_dynamic_inputs and not was_set:
-                    nncf_logger.debug(f"setting input width by user's request for scope={node_name}")
-                    nodes_to_check = [node]
-                    while any(elem is None for elem in input_masks):
-                        previous_nodes = []
-                        for node in nodes_to_check:
-                            previous_nodes.append(self._propagation_graph.get_previous_nodes(node))
-                        nodes_to_check.clear()
-                        previous_nodes = [item for nodes in previous_nodes for item in nodes]
-                        if not previous_nodes:
-                            break
-                        for previous in previous_nodes:
-                            if "output_mask" in previous.attributes:
-                                if previous.attributes["output_mask"] is not None:
-                                    input_masks.append(previous.attributes["output_mask"])
-                                    input_masks = [i for i in input_masks if i]
-                                else:
-                                    nodes_to_check.append(previous)
+            if self._add_dynamic_inputs and node_name in self._add_dynamic_inputs and not was_set:
+                nncf_logger.debug(f"setting input width by user's request for scope={node_name}")
+                nodes_to_check = [node]
+                while any(elem is None for elem in input_masks):
+                    previous_nodes = []
+                    for node in nodes_to_check:
+                        previous_nodes.append(self._propagation_graph.get_previous_nodes(node))
+                    nodes_to_check.clear()
+                    previous_nodes = [item for nodes in previous_nodes for item in nodes]
+                    if not previous_nodes:
+                        break
+                    for previous in previous_nodes:
+                        if "output_mask" in previous.attributes:
+                            if previous.attributes["output_mask"] is not None:
+                                input_masks.append(previous.attributes["output_mask"])
+                                input_masks = [i for i in input_masks if i]
                             else:
                                 nodes_to_check.append(previous)
-                    if input_masks:
-                        input_mask = input_masks[0]
-                        input_width = self.mask_to_width(input_mask)
-                        if input_width:
-                            dynamic_input_width_op.set_active_width(input_width)
-                            was_set = True
-                    if was_set:
-                        nncf_logger.debug(f"Success setting up user's request for dynamic input at scope={node_name}")
+                        else:
+                            nodes_to_check.append(previous)
+                if input_masks:
+                    input_mask = input_masks[0]
+                    input_width = self.mask_to_width(input_mask)
+                    if input_width:
+                        dynamic_input_width_op.set_active_width(input_width)
+                        was_set = True
+                if was_set:
+                    nncf_logger.debug(f"Success setting up user's request for dynamic input at scope={node_name}")
 
     def get_active_in_out_width_values(
         self,
@@ -909,7 +913,8 @@ class ElasticWidthHandler(SingleElasticityHandler):
         for cluster in self._pruned_module_groups_info.get_all_clusters():
             all_max_out_channels = {el.elastic_op.max_width for el in cluster.elements}
             if len(all_max_out_channels) != 1:
-                raise RuntimeError("Invalid grouping of layers with different number of output channels")
+                msg = "Invalid grouping of layers with different number of output channels"
+                raise nncf.InternalError(msg)
 
             first_elastic_width_info = next(iter(cluster.elements))
             op = first_elastic_width_info.elastic_op
@@ -1027,7 +1032,7 @@ class ElasticWidthBuilder(SingleElasticityBuilder):
 
         metatype_vs_elastic_op_creator = {
             PTModuleConv2dMetatype: self._create_elastic_conv_width_op,
-            PTDepthwiseConv2dSubtype: self._create_elastic_conv_width_op,
+            PTModuleDepthwiseConv2dSubtype: self._create_elastic_conv_width_op,
             PTModuleLinearMetatype: self._create_elastic_linear_width_op,
         }
 
@@ -1040,7 +1045,8 @@ class ElasticWidthBuilder(SingleElasticityBuilder):
                 list_of_node_ids.append(node.node_id)
                 layer_attrs = node.layer_attributes
                 if metatype not in metatype_vs_elastic_op_creator:
-                    raise RuntimeError(f"Elastic width is not supported for {metatype}")
+                    msg = f"Elastic width is not supported for {metatype}"
+                    raise nncf.InternalError(msg)
                 elastic_op_creator = metatype_vs_elastic_op_creator[metatype]
 
                 elastic_width_operation = elastic_op_creator(
@@ -1078,7 +1084,7 @@ class ElasticWidthBuilder(SingleElasticityBuilder):
 
         metatype_vs_dynamic_input_op_creator = {
             PTModuleConv2dMetatype: self._create_dynamic_conv_input_op,
-            PTDepthwiseConv2dSubtype: self._create_dynamic_dw_conv_input_op,
+            PTModuleDepthwiseConv2dSubtype: self._create_dynamic_dw_conv_input_op,
             PTModuleBatchNormMetatype: self._create_dynamic_bn_input_op,
             PTModuleLayerNormMetatype: self._create_dynamic_ln_input_op,
             PTModuleLinearMetatype: self._create_dynamic_linear_input_op,
@@ -1130,7 +1136,8 @@ class ElasticWidthBuilder(SingleElasticityBuilder):
             self._overwrite_groups_widths = params_from_state[self._state_names.OVERWRITE_GROUP_WIDTHS]
             self._overwriting_pruning_groups = True
             if len(self._grouped_node_names_to_prune) != len(self._overwrite_groups_widths):
-                raise RuntimeError("Mismatch between number of groups for pruning and their corresponding widths")
+                msg = "Mismatch between number of groups for pruning and their corresponding widths"
+                raise nncf.InternalError(msg)
         if params_from_state.get(self._state_names.ADD_DYNAMIC_INPUTS, None) is not None:
             self._add_dynamic_inputs = params_from_state[self._state_names.ADD_DYNAMIC_INPUTS]
 
@@ -1198,7 +1205,7 @@ class ElasticWidthBuilder(SingleElasticityBuilder):
     def _create_dynamic_bn_input_op(generic_layer_attrs: BaseLayerAttributes, node_name: str) -> UpdateBatchNormParams:
         assert isinstance(generic_layer_attrs, GenericWeightedLayerAttributes)
         dynamic_bn_input_op = ElasticInputWidthBatchNormOp(
-            max_width=generic_layer_attrs.get_num_filters(), node_name=node_name
+            max_width=get_num_filters_legacy(generic_layer_attrs), node_name=node_name
         )
         return UpdateBatchNormParams(dynamic_bn_input_op)
 
@@ -1206,7 +1213,7 @@ class ElasticWidthBuilder(SingleElasticityBuilder):
     def _create_dynamic_ln_input_op(generic_layer_attrs: BaseLayerAttributes, node_name: str) -> UpdateLayerNormParams:
         assert isinstance(generic_layer_attrs, GenericWeightedLayerAttributes)
         dynamic_ln_input_op = ElasticInputWidthLayerNormOp(
-            max_width=generic_layer_attrs.get_num_filters(), node_name=node_name
+            max_width=get_num_filters_legacy(generic_layer_attrs), node_name=node_name
         )
         return UpdateLayerNormParams(dynamic_ln_input_op)
 

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -22,6 +22,7 @@ from torch import nn
 from torch.backends import cudnn
 from torchvision.models import InceptionOutputs
 
+import nncf
 from examples.torch.classification.main import AverageMeter
 from examples.torch.classification.main import accuracy
 from examples.torch.classification.main import create_data_loaders
@@ -39,12 +40,10 @@ from examples.torch.common.model_loader import MODEL_STATE_ATTR
 from examples.torch.common.model_loader import extract_model_and_compression_states
 from examples.torch.common.model_loader import load_model
 from examples.torch.common.model_loader import load_resuming_checkpoint
-from examples.torch.common.utils import SafeMLFLow
 from examples.torch.common.utils import configure_device
 from examples.torch.common.utils import configure_logging
 from examples.torch.common.utils import get_run_name
 from examples.torch.common.utils import is_pretrained_model_requested
-from examples.torch.common.utils import log_common_mlflow_params
 from examples.torch.common.utils import make_additional_checkpoints
 from examples.torch.common.utils import print_args
 from nncf.api.compression import CompressionStage
@@ -53,7 +52,6 @@ from nncf.config.schemata.defaults import LR_POLY_DURATION_EPOCHS
 from nncf.config.schemata.defaults import STAGED_QUANTIZATION_BASE_LR
 from nncf.config.schemata.defaults import STAGED_QUANTIZATION_BASE_WD
 from nncf.torch import create_compressed_model
-from nncf.torch.binarization.algo import BinarizationController
 from nncf.torch.checkpoint_loading import load_state
 from nncf.torch.initialization import default_criterion_fn
 from nncf.torch.initialization import register_default_init_args
@@ -105,10 +103,9 @@ class PolyLRDropScheduler:
                 for group in self.optimizer.param_groups:
                     group["lr"] = lr
 
-        if self.disable_wd_start_epoch is not None:
-            if epoch_float > self.disable_wd_start_epoch:
-                for group in self.optimizer.param_groups:
-                    group["weight_decay"] = 0.0
+        if self.disable_wd_start_epoch is not None and epoch_float > self.disable_wd_start_epoch:
+            for group in self.optimizer.param_groups:
+                group["weight_decay"] = 0.0
 
     def epoch_step(self, epoch=None):
         if epoch is not None:
@@ -124,7 +121,6 @@ class PolyLRDropScheduler:
 
 def staged_quantization_main_worker(current_gpu, config):
     configure_device(current_gpu, config)
-    config.mlflow = SafeMLFLow(config)
 
     if is_main_process():
         configure_logging(logger, config)
@@ -189,10 +185,9 @@ def staged_quantization_main_worker(current_gpu, config):
     if model_state_dict is not None:
         load_state(model, model_state_dict, is_resume=True)
 
-    if not isinstance(compression_ctrl, (BinarizationController, QuantizationController)):
-        raise RuntimeError(
-            "The stage quantization sample worker may only be run with the binarization and quantization algorithms!"
-        )
+    if not isinstance(compression_ctrl, QuantizationController):
+        msg = "The stage quantization sample worker may only be run with the quantization algorithms!"
+        raise nncf.InternalError(msg)
 
     model, _ = prepare_model_for_execution(model, config)
     original_model.to(config.device)
@@ -210,7 +205,7 @@ def staged_quantization_main_worker(current_gpu, config):
 
     best_acc1 = 0
     # optionally resume from a checkpoint
-    if resuming_checkpoint is not None and config.to_onnx is None:
+    if resuming_checkpoint is not None and config.export_model_path is None:
         best_acc1 = resuming_checkpoint["best_acc1"]
         if "train" in config.mode:
             kd_loss_calculator.original_model.load_state_dict(resuming_checkpoint["original_model_state_dict"])
@@ -223,13 +218,10 @@ def staged_quantization_main_worker(current_gpu, config):
                 )
             )
         else:
-            logger.info("=> loaded checkpoint '{}'".format(resuming_checkpoint_path))
-
-    log_common_mlflow_params(config)
+            logger.info(f"=> loaded checkpoint '{resuming_checkpoint_path}'")
 
     if is_export_only:
-        export_model(compression_ctrl, config.to_onnx, config.no_strip_on_export)
-        logger.info(f"Saved to {config.to_onnx}")
+        export_model(compression_ctrl, config)
         return
 
     if config.execution_mode != ExecutionMode.CPU_ONLY:
@@ -262,8 +254,7 @@ def staged_quantization_main_worker(current_gpu, config):
         validate(val_loader, model, criterion, config)
 
     if "export" in config.mode:
-        export_model(compression_ctrl, config.to_onnx, config.no_strip_on_export)
-        logger.info(f"Saved to {config.to_onnx}")
+        export_model(compression_ctrl, config)
 
 
 def train_staged(
@@ -348,8 +339,7 @@ def train_staged(
             make_additional_checkpoints(checkpoint_path, is_best, epoch + 1, config)
 
             for key, value in prepare_for_tensorboard(statistics).items():
-                config.mlflow.safe_call("log_metric", "compression/statistics/{0}".format(key), value, epoch)
-                config.tb.add_scalar("compression/statistics/{0}".format(key), value, len(train_loader) * epoch)
+                config.tb.add_scalar(f"compression/statistics/{key}", value, len(train_loader) * epoch)
 
 
 def train_epoch_staged(
@@ -446,7 +436,7 @@ def train_epoch_staged(
                     loss=losses,
                     top1=top1,
                     top5=top5,
-                    rank="{}:".format(config.rank) if config.multiprocessing_distributed else "",
+                    rank=f"{config.rank}:" if config.multiprocessing_distributed else "",
                 )
             )
 
@@ -461,7 +451,7 @@ def train_epoch_staged(
 
             statistics = compression_ctrl.statistics(quickly_collected_only=True)
             for stat_name, stat_value in prepare_for_tensorboard(statistics).items():
-                config.tb.add_scalar("train/statistics/{}".format(stat_name), stat_value, i + global_step)
+                config.tb.add_scalar(f"train/statistics/{stat_name}", stat_value, i + global_step)
 
 
 def get_wd(optimizer):

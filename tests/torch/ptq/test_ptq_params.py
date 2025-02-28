@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -10,34 +10,35 @@
 # limitations under the License.
 
 import pytest
+import torch
 from torch import nn
 
 from nncf.common.graph.patterns import GraphPattern
 from nncf.common.graph.patterns.manager import PatternsManager
 from nncf.common.graph.transformations.commands import TargetType
+from nncf.common.graph.transformations.commands import TransformationType
 from nncf.common.utils.backend import BackendType
-from nncf.experimental.common.tensor_statistics.collectors import MaxAggregator
-from nncf.experimental.common.tensor_statistics.collectors import MeanAggregator
-from nncf.experimental.common.tensor_statistics.collectors import MinAggregator
-from nncf.experimental.common.tensor_statistics.collectors import TensorCollector
 from nncf.parameters import TargetDevice
 from nncf.quantization.algorithms.min_max.algorithm import MinMaxQuantization
 from nncf.quantization.algorithms.min_max.torch_backend import PTMinMaxAlgoBackend
 from nncf.scopes import IgnoredScope
+from nncf.torch.graph.graph import PTNNCFGraph
 from nncf.torch.graph.graph import PTTargetPoint
-from nncf.torch.graph.operator_metatypes import PTModuleConv2dMetatype
-from nncf.torch.graph.operator_metatypes import PTModuleLinearMetatype
+from nncf.torch.graph.operator_metatypes import PTCatMetatype
+from nncf.torch.graph.operator_metatypes import PTConv2dMetatype
+from nncf.torch.graph.operator_metatypes import PTLinearMetatype
 from nncf.torch.graph.operator_metatypes import PTSoftmaxMetatype
+from nncf.torch.graph.transformations.commands import PTSharedFnInsertionCommand
+from tests.common.quantization.metatypes import CatTestMetatype
 from tests.common.quantization.metatypes import Conv2dTestMetatype
 from tests.common.quantization.metatypes import LinearTestMetatype
 from tests.common.quantization.metatypes import SoftmaxTestMetatype
-from tests.post_training.test_templates.test_ptq_params import TemplateTestPTQParams
-from tests.torch.helpers import create_bn
-from tests.torch.helpers import create_conv
+from tests.cross_fw.test_templates.test_ptq_params import TemplateTestPTQParams
 from tests.torch.helpers import create_depthwise_conv
 from tests.torch.ptq.helpers import get_nncf_network
 from tests.torch.ptq.helpers import get_single_conv_nncf_graph
 from tests.torch.ptq.helpers import get_single_no_weight_matmul_nncf_graph
+from tests.torch.test_models.synthetic import LinearPTQParamsTestModel
 
 
 def get_hw_patterns(device: TargetDevice = TargetDevice.ANY) -> GraphPattern:
@@ -53,24 +54,8 @@ class ToNNCFNetworkInterface:
         return get_nncf_network(self)
 
 
-class LinearTestModel(nn.Module, ToNNCFNetworkInterface):
-    def __init__(self):
-        super().__init__()
-        self.conv1 = create_conv(3, 3, 1)
-        self.bn1 = create_bn(3)
-        self.relu = nn.ReLU()
-        self.avg_pool = nn.AdaptiveAvgPool2d(1)
-        self.conv2 = create_conv(3, 1, 1)
-        self.bn2 = create_bn(1)
-
-    def forward(self, x):
-        # input_shape = [1, 3, 32, 32]
-        x = self.relu(self.conv1(x))
-        x = self.bn1(x)
-        x = self.avg_pool(x)
-        x = self.relu(self.conv2(x))
-        x = self.bn2(x)
-        return x
+class PTLinearTestModel(LinearPTQParamsTestModel, ToNNCFNetworkInterface):
+    pass
 
 
 class OneDepthwiseConvModel(nn.Module, ToNNCFNetworkInterface):
@@ -94,18 +79,6 @@ class TestPTQParams(TemplateTestPTQParams):
     def get_algo_backend(self):
         return PTMinMaxAlgoBackend()
 
-    def check_is_min_max_statistic_collector(self, tensor_collector: TensorCollector):
-        aggrs = [aggr.__class__ for aggr in tensor_collector.aggregators.values()]
-        assert len(aggrs) == 2
-        assert MinAggregator in aggrs
-        assert MaxAggregator in aggrs
-
-    def check_is_mean_min_max_statistic_collector(self, tensor_collector: TensorCollector):
-        aggrs = [aggr.__class__ for aggr in tensor_collector.aggregators.values()]
-        assert len(aggrs) == 2
-        assert MeanAggregator in aggrs
-        assert aggrs[0].__class__ == aggrs[1].__class__
-
     def check_quantize_outputs_fq_num(self, quantize_outputs, act_num_q, weight_num_q):
         if quantize_outputs:
             assert act_num_q == 2
@@ -113,20 +86,37 @@ class TestPTQParams(TemplateTestPTQParams):
             assert act_num_q == 1
         assert weight_num_q == 1
 
+    def check_unified_scale_layout(self, layout, unified_scale_group):
+        assert len(layout.transformations) == 1
+        command = layout.transformations[0]
+        assert isinstance(command, PTSharedFnInsertionCommand)
+        assert command.op_name == "/Conv_1_0|INPUT0;/Conv_2_0|INPUT0;/Conv_3_0|INPUT0"
+        assert command.target_points == unified_scale_group
+        assert torch.allclose(command.fn.scale, torch.tensor(4.0))
+        assert command.type == TransformationType.INSERT
+
     def target_point(self, target_type: TargetType, target_node_name: str, port_id: int) -> PTTargetPoint:
         return PTTargetPoint(target_type, target_node_name, input_port_id=port_id)
+
+    def get_backend_tensor(self, value):
+        return torch.tensor(value)
 
     @property
     def metatypes_mapping(self):
         return {
-            Conv2dTestMetatype: PTModuleConv2dMetatype,
-            LinearTestMetatype: PTModuleLinearMetatype,
+            Conv2dTestMetatype: PTConv2dMetatype,
+            LinearTestMetatype: PTLinearMetatype,
             SoftmaxTestMetatype: PTSoftmaxMetatype,
+            CatTestMetatype: PTCatMetatype,
         }
+
+    @property
+    def nncf_graph_cls(self):
+        return PTNNCFGraph
 
     @pytest.fixture(scope="session")
     def test_params(self):
-        linear_model = LinearTestModel().get_nncf_network()
+        linear_model = PTLinearTestModel().get_nncf_network()
         depthwise_model = OneDepthwiseConvModel().get_nncf_network()
 
         return {

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -11,6 +11,6 @@
 
 # noqa
 from nncf.experimental.torch.nas.bootstrapNAS.elasticity import elasticity_builder as elasticity_algo
-from nncf.experimental.torch.nas.bootstrapNAS.search.search import SearchAlgorithm
+from nncf.experimental.torch.nas.bootstrapNAS.search.search import BaseSearchAlgorithm
 from nncf.experimental.torch.nas.bootstrapNAS.training import progressive_shrinking_builder as ps_algo
 from nncf.experimental.torch.nas.bootstrapNAS.training.training_algorithm import EpochBasedTrainingAlgorithm

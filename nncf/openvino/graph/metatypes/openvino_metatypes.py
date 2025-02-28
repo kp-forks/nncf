@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -14,6 +14,7 @@ from typing import List, Optional, Type
 
 import openvino.runtime as ov
 
+import nncf
 from nncf.common.graph.operator_metatypes import INPUT_NOOP_METATYPES
 from nncf.common.graph.operator_metatypes import OUTPUT_NOOP_METATYPES
 from nncf.common.graph.operator_metatypes import OperatorMetatype
@@ -47,7 +48,8 @@ class OVOpMetatype(OperatorMetatype):
             if subtype.matches(node):
                 matches.append(subtype)
         if len(matches) > 1:
-            raise RuntimeError("Multiple subtypes match operator call - can not determine single subtype.")
+            msg = "Multiple subtypes match operator call - can not determine single subtype."
+            raise nncf.InternalError(msg)
         if not matches:
             return None
         return matches[0]
@@ -58,7 +60,6 @@ class OVConvolutionMetatype(OVOpMetatype):
     name = "ConvOp"
     op_names = ["Convolution"]
     hw_config_names = [HWConfigOpName.CONVOLUTION]
-    const_channel_axis = [0]  # const layout: [C_OUT, C_IN, Z, Y, X]
     output_channel_axis = 1
 
 
@@ -67,16 +68,14 @@ class OVConvolutionBackpropDataMetatype(OVOpMetatype):
     name = "ConvBackpropDataOp"
     op_names = ["ConvolutionBackpropData"]
     hw_config_names = [HWConfigOpName.CONVOLUTION]
-    const_channel_axis = [1]  # const layout: [C_IN, C_OUT, Z, Y, X]
     output_channel_axis = 1
 
 
-@OV_OPERATOR_METATYPES.register()
+@OV_OPERATOR_METATYPES.register(is_subtype=True)
 class OVDepthwiseConvolutionMetatype(OVOpMetatype):
     name = "DepthwiseConvolutionOp"
     op_names = ["GroupConvolution"]
     hw_config_names = [HWConfigOpName.DEPTHWISECONVOLUTION]
-    const_channel_axis = [0, 1]  # const layout: [GROUPS, C_OUT / GROUPS, C_IN / GROUPS, Z, Y, X]
     output_channel_axis = 1
 
     @classmethod
@@ -90,7 +89,6 @@ class OVGroupConvolutionMetatype(OVOpMetatype):
     op_names = ["GroupConvolution"]
     hw_config_names = [HWConfigOpName.CONVOLUTION]
     subtypes = [OVDepthwiseConvolutionMetatype]
-    const_channel_axis = [0, 1]  # const layout: [GROUPS, C_OUT / GROUPS, C_IN / GROUPS, Z, Y, X]
     output_channel_axis = 1
 
 
@@ -99,7 +97,6 @@ class OVGroupConvolutionBackpropDataMetatype(OVOpMetatype):
     name = "GroupConvolutionBackpropDataOp"
     op_names = ["GroupConvolutionBackpropData"]
     hw_config_names = [HWConfigOpName.CONVOLUTION]
-    const_channel_axis = [0, 2]  # const layout: [GROUPS, C_IN / GROUPS,  C_OUT / GROUPS, Z, Y, X]
     output_channel_axis = 1
 
 
@@ -108,9 +105,6 @@ class OVMatMulMetatype(OVOpMetatype):
     name = "MatMulOp"
     op_names = ["MatMul"]
     hw_config_names = [HWConfigOpName.MATMUL]
-    const_channel_axis = [
-        -1
-    ]  # const layout: [B, ..., Y, X], where const is the second operand of matrix multiplication
     output_channel_axis = -1
 
 
@@ -136,7 +130,7 @@ class OVEluMetatype(OVOpMetatype):
 @OV_OPERATOR_METATYPES.register()
 class OVPReluMetatype(OVOpMetatype):
     name = "PReluOp"
-    op_names = ["PReLU"]
+    op_names = ["PRelu"]
 
 
 @OV_OPERATOR_METATYPES.register()
@@ -165,9 +159,23 @@ class OVAvgPoolMetatype(OVOpMetatype):
 
 
 @OV_OPERATOR_METATYPES.register()
+class OVAdaptiveAvgPoolMetatype(OVOpMetatype):
+    name = "AdaptiveAvgPoolOp"
+    op_names = ["AdaptiveAvgPool"]
+    hw_config_names = [HWConfigOpName.AVGPOOL]
+
+
+@OV_OPERATOR_METATYPES.register()
 class OVMaxPoolMetatype(OVOpMetatype):
     name = "MaxPoolOp"
     op_names = ["MaxPool"]
+    hw_config_names = [HWConfigOpName.MAXPOOL]
+
+
+@OV_OPERATOR_METATYPES.register()
+class OVAdaptiveMaxPoolMetatype(OVOpMetatype):
+    name = "AdaptiveMaxPoolOp"
+    op_names = ["AdaptiveMaxPool"]
     hw_config_names = [HWConfigOpName.MAXPOOL]
 
 
@@ -342,6 +350,12 @@ class OVFakeQuantizeMetatype(OVOpMetatype):
 
 
 @OV_OPERATOR_METATYPES.register()
+class OVFakeConvertMetatype(OVOpMetatype):
+    name = "FakeConvertOp"
+    op_names = ["FakeConvert"]
+
+
+@OV_OPERATOR_METATYPES.register()
 class OVLessMetatype(OVOpMetatype):
     name = "LessOp"
     op_names = ["Less"]
@@ -411,7 +425,7 @@ class OVLogicalXorMetatype(OVOpMetatype):
     hw_config_names = [HWConfigOpName.LOGICALXOR]
 
 
-@OV_OPERATOR_METATYPES.register()
+@OV_OPERATOR_METATYPES.register(is_subtype=True)
 class OVEmbeddingMetatype(OVOpMetatype):
     name = "EmbeddingOp"
     hw_config_names = [HWConfigOpName.EMBEDDING]
@@ -470,9 +484,15 @@ class OVLogMetatype(OVOpMetatype):
 
 
 @OV_OPERATOR_METATYPES.register()
-class OVRoiAlignMetatype(OVOpMetatype):
-    name = "RoiAlignOp"
+class OVROIAlignMetatype(OVOpMetatype):
+    name = "ROIAlignOp"
     op_names = ["ROIAlign"]
+
+
+@OV_OPERATOR_METATYPES.register()
+class OVROIPoolingMetatype(OVOpMetatype):
+    name = "ROIPoolingOp"
+    op_names = ["ROIPooling"]
 
 
 @OV_OPERATOR_METATYPES.register()
@@ -558,6 +578,13 @@ class OVStridedSliceMetatype(OVOpMetatype):
     name = "StridedSliceOp"
     op_names = ["StridedSlice"]
     hw_config_names = [HWConfigOpName.STRIDEDSLICE]
+
+
+@OV_OPERATOR_METATYPES.register()
+class OVSliceMetatype(OVOpMetatype):
+    name = "SliceOp"
+    op_names = ["Slice"]
+    hw_config_names = [HWConfigOpName.SLICE]
 
 
 @OV_OPERATOR_METATYPES.register()
@@ -651,7 +678,7 @@ class OVSwishMetatype(OVOpMetatype):
 
 @OV_OPERATOR_METATYPES.register()
 class OVHSwishMetatype(OVOpMetatype):
-    name = "HSwishhOp"
+    name = "HSwishOp"
     op_names = ["HSwish"]
 
 
@@ -700,6 +727,18 @@ class OVScaledDotProductAttentionMetatype(OVOpMetatype):
     target_input_ports = [0, 1]
 
 
+@OV_OPERATOR_METATYPES.register()
+class OVCosMetatype(OVOpMetatype):
+    name = "CosOp"
+    op_names = ["Cos"]
+
+
+@OV_OPERATOR_METATYPES.register()
+class OVSinMetatype(OVOpMetatype):
+    name = "SinOp"
+    op_names = ["Sin"]
+
+
 def get_operator_metatypes() -> List[Type[OperatorMetatype]]:
     """
     Returns a list of the operator metatypes.
@@ -721,13 +760,13 @@ def get_operation_const_op(operation: ov.Node, const_port_id: int) -> Optional[o
     # There are several cases here
     # (Constant) -> (Operation)
     # (Constant) -> (Convert) -> (Operation)
-    # (Constant) -> (Convert) -> (FakeQuantize) -> (Operation)
-    # (Constant) -> (Convert) -> (FakeQuantize) -> (Reshape) -> (Operation)
+    # (Constant) -> (Convert) -> (FakeQuantize, FakeConvert) -> (Operation)
+    # (Constant) -> (Convert) -> (FakeQuantize, FakeConvert) -> (Reshape) -> (Operation)
     #  and etc. We need properly find the constant node. So we start with
     # `node` and traverse up until the constant node is not found.
     queue = deque([node])
     constant_node = None
-    allowed_propagation_types_list = ["Convert", "FakeQuantize", "Reshape"]
+    allowed_propagation_types_list = ["Convert", "FakeQuantize", "FakeConvert", "Reshape"]
 
     while len(queue) != 0:
         curr_node = queue.popleft()
@@ -789,9 +828,8 @@ def get_node_metatype(node: ov.Node) -> Type[OperatorMetatype]:
     """
     node_type = node.get_type_name()
     metatype = OV_OPERATOR_METATYPES.get_operator_metatype_by_op_name(node_type)
-    if metatype is not UnknownMetatype:
-        if metatype.get_subtypes():
-            subtype = metatype.determine_subtype(node)
-            if subtype is not None:
-                metatype = subtype
+    if metatype is not UnknownMetatype and metatype.get_subtypes():
+        subtype = metatype.determine_subtype(node)
+        if subtype is not None:
+            metatype = subtype
     return metatype

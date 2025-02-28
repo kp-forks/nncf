@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -18,6 +18,7 @@ from nncf.common.quantization.structs import QuantizationPreset
 from nncf.common.tensor_statistics.statistic_point import StatisticPointsContainer
 from nncf.common.utils.backend import BackendType
 from nncf.parameters import ModelType
+from nncf.parameters import QuantizationMode
 from nncf.parameters import TargetDevice
 from nncf.quantization.advanced_parameters import AdvancedQuantizationParameters
 from nncf.quantization.algorithms.algorithm import Algorithm
@@ -38,6 +39,7 @@ class PostTrainingQuantization(Algorithm):
 
     def __init__(
         self,
+        mode: Optional[QuantizationMode] = None,
         preset: Optional[QuantizationPreset] = None,
         target_device: TargetDevice = TargetDevice.ANY,
         subset_size: int = 300,
@@ -47,12 +49,13 @@ class PostTrainingQuantization(Algorithm):
         advanced_parameters: Optional[AdvancedQuantizationParameters] = None,
     ):
         """
+        :param mode: Special quantization mode that specify different ways of the optimization.
         :param preset: A preset controls the quantization mode (symmetric and asymmetric).
             It can take the following values:
             - `performance`: Symmetric quantization of weights and activations.
             - `mixed`: Symmetric quantization of weights and asymmetric quantization of activations.
             Default value is None. In this case, `mixed` preset is used for `transformer`
-            model type otherwise `performace`.
+            model type otherwise `performance`.
         :param target_device: A target device the specificity of which will be taken
             into account while compressing in order to obtain the best performance
             for this type of device.
@@ -69,7 +72,14 @@ class PostTrainingQuantization(Algorithm):
             fine-tuning the quantization algorithm
         """
         self._pipeline = create_ptq_pipeline(
-            preset, target_device, subset_size, fast_bias_correction, model_type, ignored_scope, advanced_parameters
+            mode=mode,
+            preset=preset,
+            target_device=target_device,
+            subset_size=subset_size,
+            fast_bias_correction=fast_bias_correction,
+            model_type=model_type,
+            ignored_scope=ignored_scope,
+            advanced_parameters=advanced_parameters,
         )
 
     @property
@@ -90,10 +100,11 @@ class PostTrainingQuantization(Algorithm):
         dataset: Optional[Dataset] = None,
     ) -> TModel:
         if dataset is None and len(self._pipeline.pipeline_steps) > 1:
-            raise ValueError(
+            msg = (
                 "A dataset is required for the post-training quantization "
                 "algorithm to collect statistics for intermediate models."
             )
+            raise ValueError(msg)
 
         step_index_to_statistics = None
         if statistic_points:

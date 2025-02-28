@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -12,9 +12,9 @@
 from collections import defaultdict
 from copy import deepcopy
 from enum import Enum
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Set
 
-import networkx as nx
+import networkx as nx  # type: ignore
 
 from nncf.common.graph import NNCFGraph
 from nncf.common.graph import NNCFNodeName
@@ -23,7 +23,6 @@ from nncf.common.graph.graph_matching import find_subgraphs_matching_pattern
 from nncf.common.graph.layer_attributes import Dtype
 from nncf.common.graph.operator_metatypes import INPUT_NOOP_METATYPES
 from nncf.common.graph.patterns import GraphPattern
-from nncf.common.logging import nncf_logger
 
 
 class InsertionPointGraphNodeType(Enum):
@@ -37,7 +36,7 @@ class PreHookInsertionPoint:
         self.target_node_name = target_node_name
         self.input_port_id = input_port_id
 
-    def __str__(self):
+    def __str__(self) -> str:
         return str(self.input_port_id) + " " + self.target_node_name
 
 
@@ -45,11 +44,11 @@ class PostHookInsertionPoint:
     def __init__(self, target_node_name: str):
         self.target_node_name = target_node_name
 
-    def __str__(self):
+    def __str__(self) -> str:
         return self.target_node_name
 
 
-class InsertionPointGraph(nx.DiGraph):
+class InsertionPointGraph(nx.DiGraph):  # type: ignore
     """
     This graph is built from the NNCFGraph representation of the model control flow graph and adds ephemeral
     "insertion point nodes" into the NNCF model graph representation corresponding to operator pre- and
@@ -74,7 +73,6 @@ class InsertionPointGraph(nx.DiGraph):
     def __init__(
         self,
         nncf_graph: NNCFGraph,
-        weight_modifiable_node_names: List[NNCFNodeName] = None,
         allowed_pre_hook_insertion_points: List[PreHookInsertionPoint] = None,
         allowed_post_hook_insertion_points: List[PostHookInsertionPoint] = None,
     ):
@@ -82,8 +80,6 @@ class InsertionPointGraph(nx.DiGraph):
         Initializes the insertion point graph.
 
         :param nncf_graph: The base NNCFGraph representing the model structure.
-        :param weight_modifiable_node_names: Names of the nodes in `nncf_graph` that correspond to operations with
-          modifiable weights.
         :param allowed_pre_hook_insertion_points: A list of pre-hook insertion points for this graph to allow.
           If left unspecified, every node in `nncf_graph` will be allowed to have a separate pre-hook for each of its
           tensor inputs.
@@ -91,13 +87,8 @@ class InsertionPointGraph(nx.DiGraph):
         If left unspecified, every node in `nncf_graph` will be allowed to have a single post-hook for its output
          (post-hooking separate tensors in an operation's output is not currently supported)
         """
-
         super().__init__()
         self._base_nx_graph = deepcopy(nncf_graph.get_nx_graph_copy())
-        if weight_modifiable_node_names is None:
-            self._weight_modifiable_node_names = []
-        else:
-            self._weight_modifiable_node_names = weight_modifiable_node_names
 
         if allowed_pre_hook_insertion_points is None:
             allowed_pre_hook_insertion_points = self._get_default_pre_hook_ip_list(nncf_graph)
@@ -237,10 +228,6 @@ class InsertionPointGraph(nx.DiGraph):
                     for follower_node_key in self.successors(from_node_key):
                         self.edges[from_node_key, follower_node_key][self.IS_INTEGER_PATH_EDGE_ATTR] = True
 
-    @property
-    def weight_modifiable_node_names(self) -> List[NNCFNodeName]:
-        return self._weight_modifiable_node_names
-
     @staticmethod
     def _get_default_pre_hook_ip_list(nncf_graph: NNCFGraph) -> List[PreHookInsertionPoint]:
         # Pre-hook all input ports of all nodes
@@ -316,7 +303,7 @@ class InsertionPointGraph(nx.DiGraph):
             if data[InsertionPointGraph.IS_MERGED_NODE_ATTR]:
                 for nncf_node in data[InsertionPointGraph.MERGED_NNCF_NODE_LIST_NODE_ATTR]:
                     if node_key == nncf_node.node_key:
-                        return node
+                        return node  # type: ignore
         return node_key
 
     def get_ip_graph_with_merged_hw_optimized_operations(
@@ -327,12 +314,11 @@ class InsertionPointGraph(nx.DiGraph):
         single node; the resulting InsertionPointGraph no longer has accessible the pre- and post-hooks that were
         located in  the middle of the fused pattern.
         If the InsertionPointGraph should be filtered from constant nodes before the node fusing,
-        then 'known_non_constant_node_keys' should be pass. This is the list of the node known that are non constansts.
+        then 'known_non_constant_node_keys' should be pass. This is the list of the node known that are non constants.
 
-        :param full_fusing_pattern: The GraphPatttern object representing a composition of fusing pattern variants.
+        :param full_fusing_pattern: The GraphPattern object representing a composition of fusing pattern variants.
         :return: The InsertionPointGraph with nodes fused according to pattern matching.
         """
-
         merged_ip_graph = deepcopy(self)
         matches = find_subgraphs_matching_pattern(merged_ip_graph.get_base_nx_graph(), full_fusing_pattern)
         for match in matches:
@@ -393,34 +379,3 @@ class InsertionPointGraph(nx.DiGraph):
     @staticmethod
     def get_post_hook_node_key(node_key: str) -> str:
         return InsertionPointGraph.POST_HOOK_ID_PREFIX + node_key
-
-
-class ConstantNodesFilter:
-    @staticmethod
-    def filter(ip_graph: InsertionPointGraph, start_traversing_node_keys: Optional[List[str]]) -> InsertionPointGraph:
-        """
-        Removes all Constant nodes from InsertionPointGraph, making it inference graph.
-        The traversing starts from the input nodes and nodes with weights.
-
-        :param ip_graph: The original InsertionPointGraph.
-        :param start_traversing_node_keys: Keys of the nodes from which the traversing will be start.
-        :return: InsertionPointGraph without Constant nodes.
-        """
-        input_nodes = ip_graph.get_input_nodes()
-        if not input_nodes:
-            nncf_logger.debug("Skipped filtering - no input nodes found")
-            return ip_graph
-        weight_nodes = []
-        if start_traversing_node_keys is not None:
-            weight_nodes = [
-                ip_graph.get_merged_node_from_single_node_key(weight_node) for weight_node in start_traversing_node_keys
-            ]
-        visited_nodes = set()
-        start_nodes = input_nodes + weight_nodes
-        for node in start_nodes:
-            for node_from, node_to in nx.bfs_edges(ip_graph, source=node):
-                visited_nodes.add(node_from)
-                visited_nodes.add(node_to)
-        constant_nodes = [node for node in ip_graph.nodes if node not in visited_nodes]
-        ip_graph.remove_nodes_from(constant_nodes)
-        return ip_graph

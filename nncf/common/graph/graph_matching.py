@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -10,15 +10,15 @@
 # limitations under the License.
 from typing import Dict, List
 
-import networkx as nx
-import networkx.algorithms.isomorphism as ism
+import networkx as nx  # type:ignore
+import networkx.algorithms.isomorphism as ism  # type:ignore
 
 from nncf.common.graph.patterns import GraphPattern
 
 ATTRS_TO_SKIP = [GraphPattern.LABEL_ATTR, GraphPattern.PATTERN_NODE_TO_EXCLUDE]
 
 
-def _are_nodes_matched(node_1, node_2) -> bool:
+def _are_nodes_matched(node_1, node_2) -> bool:  # type:ignore
     for attr in node_2:
         if attr in ATTRS_TO_SKIP:
             continue
@@ -29,10 +29,9 @@ def _are_nodes_matched(node_1, node_2) -> bool:
                 continue
             # Torch and TF pattern mapping based on 'type' section,
             # While ONNX mapping based on metatypes -
-            # to support all of them, we need to check the existane of the attributes
-            if GraphPattern.NODE_TYPE_ATTR in node_1:
-                if node_1[GraphPattern.NODE_TYPE_ATTR] in node_2[attr]:
-                    continue
+            # to support all of them, we need to check the existence of the attributes
+            if GraphPattern.NODE_TYPE_ATTR in node_1 and node_1[GraphPattern.NODE_TYPE_ATTR] in node_2[attr]:
+                continue
         if node_1[attr] not in node_2[attr]:
             return False
     return True
@@ -58,6 +57,7 @@ def _is_subgraph_matching_strict(graph: nx.DiGraph, pattern: nx.DiGraph, subgrap
     3) External successors or predecessors of the nodes which are not starting and last.
     If any of these conditions is True, than returns False, otherwise - True.
     The checks are skipped for NON_PATTERN_NODE_TYPE.
+
     Example:
     This subgraph matching is not strict.
     (conv2d + BN + ReLU pattern):
@@ -72,6 +72,7 @@ def _is_subgraph_matching_strict(graph: nx.DiGraph, pattern: nx.DiGraph, subgrap
            (cat)----/
              |
             ...
+
     :param graph: The model graph.
     :param pattern: The matched pattern.
     :param subgraph: A subgraph of the model graph including the nodes outside the pattern.
@@ -91,13 +92,13 @@ def _is_subgraph_matching_strict(graph: nx.DiGraph, pattern: nx.DiGraph, subgrap
         predecessors_keys = graph.pred[node_from_graph].keys()
         successor_keys = graph.succ[node_from_graph].keys()
         has_external_successors = any(successor_key not in subgraph for successor_key in successor_keys)
-        has_external_predcessors = any(predecessor_key not in subgraph for predecessor_key in predecessors_keys)
+        has_external_predecessors = any(predecessor_key not in subgraph for predecessor_key in predecessors_keys)
         if node_from_pattern in starting_nodes and has_external_successors:
             return False
-        if node_from_pattern in last_nodes and has_external_predcessors:
+        if node_from_pattern in last_nodes and has_external_predecessors:
             return False
         if (node_from_pattern not in last_nodes and node_from_pattern not in starting_nodes) and (
-            has_external_successors or has_external_predcessors
+            has_external_successors or has_external_predecessors
         ):
             return False
     return True

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -14,6 +14,7 @@ from typing import Optional, TypeVar
 from nncf.common.deprecation import warning_deprecated
 from nncf.common.quantization.structs import QuantizationPreset
 from nncf.parameters import ModelType
+from nncf.parameters import QuantizationMode
 from nncf.parameters import TargetDevice
 from nncf.quantization.advanced_parameters import AdvancedQuantizationParameters
 from nncf.quantization.algorithms.bias_correction.algorithm import BIAS_CORRECTION_THRESHOLD
@@ -30,6 +31,7 @@ TModel = TypeVar("TModel")
 
 
 def create_ptq_pipeline(
+    mode: Optional[QuantizationMode] = None,
     preset: Optional[QuantizationPreset] = None,
     target_device: TargetDevice = TargetDevice.ANY,
     subset_size: int = 300,
@@ -47,12 +49,13 @@ def create_ptq_pipeline(
         3) MinMaxQuantization
         4) FastBiasCorrection or BiasCorrection
 
+    :param mode: Special quantization mode that specify different ways of the optimization.
     :param preset: A preset controls the quantization mode (symmetric and asymmetric).
         It can take the following values:
         - `performance`: Symmetric quantization of weights and activations.
         - `mixed`: Symmetric quantization of weights and asymmetric quantization of activations.
         Default value is None. In this case, `mixed` preset is used for `transformer`
-        model type otherwise `performace`.
+        model type otherwise `performance`.
     :param target_device: A target device the specificity of which will be taken
         into account while compressing in order to obtain the best performance
         for this type of device.
@@ -69,9 +72,6 @@ def create_ptq_pipeline(
         fine-tuning the quantization algorithm
     :return: A post-training quantization pipeline.
     """
-    if target_device is TargetDevice.VPU:
-        warning_deprecated("VPU device is deprecated and will no longer be supported in the future.")
-
     if advanced_parameters is None:
         advanced_parameters = AdvancedQuantizationParameters()
 
@@ -106,19 +106,22 @@ def create_ptq_pipeline(
     pipeline_steps.append(
         [
             MinMaxQuantization(
-                preset,
-                target_device,
-                subset_size,
-                model_type,
-                ignored_scope,
-                advanced_parameters.overflow_fix,
-                advanced_parameters.quantize_outputs,
-                advanced_parameters.inplace_statistics,
-                advanced_parameters.activations_quantization_params,
-                advanced_parameters.weights_quantization_params,
-                advanced_parameters.activations_range_estimator_params,
-                advanced_parameters.weights_range_estimator_params,
-                advanced_parameters.backend_params,
+                mode=mode,
+                preset=preset,
+                target_device=target_device,
+                subset_size=subset_size,
+                model_type=model_type,
+                ignored_scope=ignored_scope,
+                overflow_fix=advanced_parameters.overflow_fix,
+                quantize_outputs=advanced_parameters.quantize_outputs,
+                inplace_statistics=advanced_parameters.inplace_statistics,
+                batchwise_statistics=advanced_parameters.batchwise_statistics,
+                activations_quantization_params=advanced_parameters.activations_quantization_params,
+                weights_quantization_params=advanced_parameters.weights_quantization_params,
+                activations_range_estimator_params=advanced_parameters.activations_range_estimator_params,
+                weights_range_estimator_params=advanced_parameters.weights_range_estimator_params,
+                quantizer_propagation_rule=advanced_parameters.quantizer_propagation_rule,
+                backend_params=advanced_parameters.backend_params,
             )
         ]
     )

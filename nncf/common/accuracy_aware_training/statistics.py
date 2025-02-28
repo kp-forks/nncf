@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -29,7 +29,7 @@ class TrainingLoopStatistics(Statistics):
     relative_accuracy_degradation: float
     accuracy_budget: float
 
-    def to_str(self):
+    def to_str(self) -> str:
         stats_str = (
             f"Uncompressed model accuracy: {self.uncompressed_accuracy:.4f}\n"
             f"Compressed model accuracy: {self.compressed_accuracy:.4f}\n"

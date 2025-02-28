@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -20,7 +20,7 @@ from torch import Tensor
 from nncf.common.logging import nncf_logger
 from nncf.common.utils.decorators import skip_if_dependency_unavailable
 from nncf.common.utils.dot_file_rw import write_dot_graph
-from nncf.torch.nncf_network import ExtraCompressionModuleType
+from nncf.torch.graph.transformations.commands import ExtraCompressionModuleType
 from nncf.torch.nncf_network import NNCFNetwork
 from nncf.torch.quantization.adjust_padding import add_adjust_padding_nodes
 from nncf.torch.quantization.layers import QUANTIZATION_MODULES
@@ -134,7 +134,7 @@ class HAWQDebugger:
 
     @skip_if_dependency_unavailable(dependencies=["matplotlib.pyplot"])
     def dump_metric_flops(
-        self, metric_per_qconfig_sequence: List[Tensor], flops_per_config: List[float], choosen_qconfig_index: int
+        self, metric_per_qconfig_sequence: List[Tensor], flops_per_config: List[float], chosen_qconfig_index: int
     ):
         import matplotlib.pyplot as plt
 
@@ -151,8 +151,8 @@ class HAWQDebugger:
         configuration_index = flops_per_config.index(cm_m)
         ms_m = metric_per_qconfig_sequence[configuration_index].item()
         ax.scatter(cm_m, ms_m, s=30, facecolors="none", edgecolors="b", label="median from all metrics")
-        cm_c = metric_per_qconfig_sequence[choosen_qconfig_index].item()
-        fpc_c = flops_per_config[choosen_qconfig_index].item()
+        cm_c = metric_per_qconfig_sequence[chosen_qconfig_index].item()
+        fpc_c = flops_per_config[chosen_qconfig_index].item()
         ax.scatter(fpc_c, cm_c, s=30, facecolors="none", edgecolors="r", label="chosen config")
 
         ax.legend()

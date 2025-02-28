@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -22,7 +22,6 @@ class BackendParameters:
     WEIGHTS = "weights"
     LEVEL_LOW = "level_low"
     LEVEL_HIGH = "level_high"
-    USE_POT = "use_pot"
 
 
 def is_weight_compression_needed(advanced_parameters: Optional[AdvancedQuantizationParameters]) -> bool:
@@ -33,6 +32,6 @@ def is_weight_compression_needed(advanced_parameters: Optional[AdvancedQuantizat
     :param advanced_parameters: Advanced quantization parameters.
     :return: True if weight compression is needed, False otherwise.
     """
-    if advanced_parameters is None:
-        return True
-    return advanced_parameters.backend_params.get(BackendParameters.COMPRESS_WEIGHTS, True)
+    if advanced_parameters is not None and advanced_parameters.backend_params is not None:
+        return advanced_parameters.backend_params.get(BackendParameters.COMPRESS_WEIGHTS, True)
+    return True

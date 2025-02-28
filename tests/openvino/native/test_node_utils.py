@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -10,31 +10,85 @@
 # limitations under the License.
 
 import numpy as np
+import openvino.runtime as ov
 import pytest
+from openvino.runtime import opset13 as opset
 
-from nncf.common.factory import NNCFGraphFactory
 from nncf.common.graph.graph import NNCFNode
+from nncf.common.utils.os import is_macos
 from nncf.openvino.graph.layer_attributes import OVLayerAttributes
 from nncf.openvino.graph.metatypes.openvino_metatypes import OVMatMulMetatype
 from nncf.openvino.graph.nncf_graph_builder import GraphConverter
-from nncf.openvino.graph.node_utils import get_channel_agnostic_reduction_axes
+from nncf.openvino.graph.node_utils import get_const_value
 from nncf.openvino.graph.node_utils import get_weight_channel_axes
-from nncf.openvino.graph.node_utils import get_weight_value
+from nncf.openvino.graph.node_utils import get_weighted_layer_attributes
 from nncf.openvino.graph.node_utils import is_node_with_bias
+from nncf.openvino.graph.node_utils import non_convertable_divide_op
 from tests.openvino.native.models import ConvModel
 from tests.openvino.native.models import ConvNotBiasModel
-from tests.openvino.native.models import FPModel
 from tests.openvino.native.models import MatMul2DModel
 from tests.openvino.native.models import MatMul2DNotBiasModel
 
 
-def test_get_weight_value_const_with_convert():
-    model = FPModel(const_dtype="FP16").ov_model
-    nncf_graph = NNCFGraphFactory.create(model)
-    node_with_weight = nncf_graph.get_node_by_name("MatMul")
+@pytest.mark.parametrize(
+    "precisions,cast_bf16_to_fp32",
+    [
+        # base FP32 precision
+        (
+            {
+                "type_for_const": ov.Type.f32,
+                "ref_type": np.float32,
+            },
+            True,
+        ),
+        # base FP16 precision
+        (
+            {
+                "type_for_const": ov.Type.f16,
+                "ref_type": np.float16,
+            },
+            True,
+        ),
+        # base BF16 precision should be casted to FP32
+        (
+            {
+                "type_for_const": ov.Type.bf16,
+                "ref_type": np.float32,
+            },
+            True,
+        ),
+        # base FP32 precision, cast_bf16_to_fp32=False has no effect
+        (
+            {
+                "type_for_const": ov.Type.f32,
+                "ref_type": np.float32,
+            },
+            False,
+        ),
+        # base FP16 precision, cast_bf16_to_fp32=False has no effect
+        (
+            {
+                "type_for_const": ov.Type.f16,
+                "ref_type": np.float16,
+            },
+            False,
+        ),
+        # with cast_bf16_to_fp32=False BF16 constant is retrieved as FP16
+        (
+            {
+                "type_for_const": ov.Type.bf16,
+                "ref_type": np.float16,
+            },
+            False,
+        ),
+    ],
+)
+def test_get_const_value(precisions, cast_bf16_to_fp32):
+    const_data = np.ones((1, 2, 3), dtype=np.float32)
+    weight_const = opset.constant(const_data, dtype=precisions["type_for_const"])
 
-    actual_value = get_weight_value(node_with_weight, model, port_id=1)
-    assert actual_value.dtype == np.float16
+    const_value = get_const_value(weight_const, cast_bf16_to_fp32=cast_bf16_to_fp32)
+    assert const_value.dtype == precisions["ref_type"]
 
 
 @pytest.mark.parametrize(
@@ -58,50 +112,59 @@ def test_is_node_with_bias(model_to_create, is_with_bias, node_name):
 
 
 @pytest.mark.parametrize(
-    "weights_port_id, transpose, shape, expected_channel_axes",
+    "weights_port_id, transpose, shape, dtype, expected_channel_axes",
     [
-        (0, False, (1,), [0]),
-        (0, True, (1,), []),
-        (1, False, (1,), []),
-        (1, True, (1,), [0]),
-        (0, False, (1, 1), [0]),
-        (0, True, (1, 1), [1]),
-        (1, False, (1, 1), [1]),
-        (1, True, (1, 1), [0]),
-        (0, False, (1, 1, 1, 1), [0, 1, 2]),
-        (0, True, (1, 1, 1, 1), [0, 1, 3]),
-        (1, False, (1, 1, 1, 1), [0, 1, 3]),
-        (1, True, (1, 1, 1, 1), [0, 1, 2]),
+        (0, False, (1,), "f32", []),
+        (0, True, (1,), "f32", []),
+        (1, False, (1,), "f32", []),
+        (1, True, (1,), "f32", []),
+        (0, False, (1, 1), "f32", [0]),
+        (0, True, (1, 1), "f32", [1]),
+        (1, False, (1, 1), "f32", [1]),
+        (1, True, (1, 1), "f32", [0]),
+        (0, False, (1, 1, 1, 1), "f32", [0, 1, 2]),
+        (0, True, (1, 1, 1, 1), "f32", [0, 1, 3]),
+        (1, False, (1, 1, 1, 1), "f32", [0, 1, 3]),
+        (1, True, (1, 1, 1, 1), "f32", [0, 1, 2]),
     ],
 )
-def test_get_weight_channel_axes_for_matmul(weights_port_id, transpose, shape, expected_channel_axes):
+def test_get_weight_channel_axes_for_matmul(weights_port_id, transpose, shape, dtype, expected_channel_axes):
+    input_1 = opset.parameter([1, 1], name="Input", dtype=np.float32)
+    constant_1 = opset.constant(np.ones(shape).astype(np.float32))
+    inputs_ = (input_1, constant_1) if weights_port_id == 1 else (constant_1, input_1)
+    matmul_1 = opset.matmul(*inputs_, transpose_a=transpose, transpose_b=transpose, name="MatMul")
+
+    constant_attrs = {weights_port_id: {"transpose": transpose, "shape": shape, "dtype": dtype}}
     attributes = {
         NNCFNode.ID_NODE_ATTR: 0,
         NNCFNode.NODE_NAME_ATTR: "test",
         NNCFNode.METATYPE_ATTR: OVMatMulMetatype,
         NNCFNode.LAYER_ATTRIBUTES: OVLayerAttributes(
-            constant_attributes={weights_port_id: {"transpose": transpose, "shape": shape}}
+            layer_attributes=get_weighted_layer_attributes(matmul_1, OVMatMulMetatype, constant_attrs),
+            constant_attributes=constant_attrs,
         ),
     }
     node = NNCFNode(attributes)
-    actual_channel_axes = get_weight_channel_axes(node, weights_port_id)
+    actual_channel_axes = get_weight_channel_axes(node)
 
     assert len(actual_channel_axes) == len(expected_channel_axes)
     assert all(a == b for a, b in zip(actual_channel_axes, expected_channel_axes))
 
 
 @pytest.mark.parametrize(
-    "shape, channel_axes, ref_reduction_axes",
+    "a,b,convertable,ref_result",
     [
-        ((1, 128), [-1], (0,)),
-        ((1, 256, 1), [-2], (0, 2)),
-        ((1, 128, 512), [-1], (0, 1)),
-        ((1, 3, 224, 224), [1], (0, 2, 3)),
-        ((1, 1, 12, 12), [1], (0, 2, 3)),
-        ((1, 1, 12, 12), [1, 2], (0, 3)),
+        (0.0585990399, 15, True, 0.003906603),
+        (0.0585990399, 15, False, 0.0039066025),
     ],
 )
-def test_get_channel_agnostic_reduction_axes(shape, channel_axes, ref_reduction_axes):
-    reduction_axes = get_channel_agnostic_reduction_axes(channel_axes=channel_axes, shape=shape)
-
-    assert reduction_axes == ref_reduction_axes
+@pytest.mark.skipif(is_macos(), reason="Not relevant for MacOS, returns 0.0039062500 in both cases.")
+def test_non_convertable_division(a, b, convertable, ref_result):
+    a, b, ref_result = tuple(map(lambda x: np.array([x], np.float32), [a, b, ref_result]))
+    a_param = opset.parameter((-1,), ov.Type.f32)
+    b_param = opset.parameter((-1,), ov.Type.f32)
+    division = (a_param / b_param) if convertable else non_convertable_divide_op(a_param, b_param)
+    model = ov.Model([division], [a_param, b_param])
+    compiled_model = ov.compile_model(model, device_name="CPU")
+    actual_result = compiled_model([a, b])[0]
+    np.testing.assert_allclose(actual_result, ref_result, atol=0, rtol=0)

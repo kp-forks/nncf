@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -19,6 +19,7 @@ import pytest
 import torch
 import torch.nn
 
+import nncf
 from nncf.common.graph import NNCFNodeName
 from nncf.common.graph.transformations.commands import TargetType
 from nncf.common.hardware.config import HWConfigType
@@ -26,7 +27,10 @@ from nncf.common.quantization.quantizer_propagation.solver import QuantizerPropa
 from nncf.common.quantization.structs import NonWeightQuantizerId
 from nncf.torch.dynamic_graph.operation_address import OperationAddress
 from nncf.torch.graph.transformations.commands import PTTargetPoint
+from nncf.torch.model_creation import wrap_model
+from nncf.torch.nncf_network import NNCFNetwork
 from nncf.torch.quantization.layers import AsymmetricQuantizer
+from tests.cross_fw.test_templates.test_unified_scales import TemplateTestUnifiedScales
 from tests.torch.helpers import create_compressed_model_and_algo_for_test
 from tests.torch.helpers import get_nodes_by_type
 from tests.torch.helpers import register_bn_adaptation_init_args
@@ -288,7 +292,7 @@ def test_insertion_point_coalescing(
     ref_coalesced_ip_lists: List[List[PTTargetPoint]],
 ):
     if ref_coalesced_ip_lists is None:
-        with pytest.raises(RuntimeError):
+        with pytest.raises((nncf.InternalError, nncf.ValidationError)):
             _ = QuantizerPropagationSolver.coalesce_insertion_points(input_insertion_points, linked_scopes_groups_list)
     else:
         test_coalesced_ip_lists = QuantizerPropagationSolver.coalesce_insertion_points(
@@ -375,7 +379,7 @@ def test_quantizer_scale_linking(mocker):
         assert non_shared_spy.call_count == 1
 
 
-def test_eltwise_unified_scales_for_vpu():
+def test_eltwise_unified_scales_for_npu():
     nncf_config = get_quantization_config_without_range_init(model_size=1)
     nncf_config["input_info"] = [
         {
@@ -385,7 +389,7 @@ def test_eltwise_unified_scales_for_vpu():
             "sample_size": [1, 1, 1, 1],
         },
     ]
-    nncf_config["target_device"] = "VPU"
+    nncf_config["target_device"] = "NPU"
     register_bn_adaptation_init_args(nncf_config)
 
     _, compression_ctrl = create_compressed_model_and_algo_for_test(EltwiseQuantizerLinkingTestModel(), nncf_config)
@@ -577,7 +581,7 @@ class TestsWithONNXInspection:
                 "sample_size": [1, 1, 1, 2],
             },
         ]
-        nncf_config["target_device"] = "VPU"
+        nncf_config["target_device"] = "NPU"
         register_bn_adaptation_init_args(nncf_config)
 
         compressed_model, compression_ctrl = create_compressed_model_and_algo_for_test(
@@ -632,7 +636,7 @@ class TestsWithONNXInspection:
         nncf_config["input_info"] = [
             {"sample_size": [1, 5], "type": "long", "filler": "zeros"},
         ]
-        nncf_config["target_device"] = "VPU"
+        nncf_config["target_device"] = "NPU"
         register_bn_adaptation_init_args(nncf_config)
 
         compressed_model, compression_ctrl = create_compressed_model_and_algo_for_test(
@@ -701,7 +705,7 @@ def test_unified_scales_with_shared_nodes():
     nncf_config["input_info"] = [
         {"sample_size": [1, 5], "type": "long", "filler": "zeros"},
     ]
-    nncf_config["target_device"] = "VPU"
+    nncf_config["target_device"] = "NPU"
     register_bn_adaptation_init_args(nncf_config)
 
     _, compression_ctrl = create_compressed_model_and_algo_for_test(
@@ -710,3 +714,21 @@ def test_unified_scales_with_shared_nodes():
 
     assert len(compression_ctrl.weight_quantizers) == 1  # The two embedding nodes point to a single shared layer
     assert len(compression_ctrl.non_weight_quantizers) == 0  # The "add" operation has its inputs already quantized
+
+
+class TestUnifiedScales(TemplateTestUnifiedScales):
+    def get_backend_specific_model(self, model: torch.nn.Module) -> NNCFNetwork:
+        q_input_shape = model.Q_INPUT_SHAPE
+        kv_input_shape = model.KV_INPUT_SHAPE
+        backend_model = wrap_model(
+            model,
+            (
+                torch.ones(q_input_shape),
+                torch.ones(q_input_shape),
+                torch.ones(kv_input_shape),
+                torch.ones(kv_input_shape),
+            ),
+            trace_parameters=True,
+        )
+
+        return backend_model

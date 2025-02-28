@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -9,22 +9,34 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any, Callable, TypeVar, Union
 
-class api:
-    API_MARKER_ATTR = "_nncf_api_marker"
-    CANONICAL_ALIAS_ATTR = "_nncf_canonical_alias"
+TObj = TypeVar("TObj", bound=Union[Callable[..., Any], type])
 
-    def __init__(self, canonical_alias: str = None):
-        self._canonical_alias = canonical_alias
+API_MARKER_ATTR = "_nncf_api_marker"
+CANONICAL_ALIAS_ATTR = "_nncf_canonical_alias"
 
-    def __call__(self, obj):
-        # The value of the marker will be useful in determining
-        # whether we are handling a base class or a derived one.
-        setattr(obj, api.API_MARKER_ATTR, obj.__name__)
-        if self._canonical_alias is not None:
-            setattr(obj, api.CANONICAL_ALIAS_ATTR, self._canonical_alias)
+
+def api(canonical_alias: str = None) -> Callable[[TObj], TObj]:
+    """
+    Decorator function used to mark a object as an API.
+
+    Example:
+        @api(canonical_alias="alias")
+        class Class:
+            pass
+
+        @api(canonical_alias="alias")
+        def function():
+            pass
+
+    :param canonical_alias: The canonical alias for the API class.
+    """
+
+    def decorator(obj: TObj) -> TObj:
+        setattr(obj, API_MARKER_ATTR, obj.__name__)
+        if canonical_alias is not None:
+            setattr(obj, CANONICAL_ALIAS_ATTR, canonical_alias)
         return obj
 
-
-def is_api(obj) -> bool:
-    return hasattr(obj, api.API_MARKER_ATTR)
+    return decorator

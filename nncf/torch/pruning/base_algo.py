@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -11,7 +11,6 @@
 from typing import Dict, List
 
 import torch
-from texttable import Texttable
 from torch import nn
 
 from nncf import NNCFConfig
@@ -21,6 +20,7 @@ from nncf.common.pruning.clusterization import Cluster
 from nncf.common.pruning.clusterization import Clusterization
 from nncf.common.pruning.mask_propagation import MaskPropagationAlgorithm
 from nncf.common.pruning.utils import is_prunable_depthwise_conv
+from nncf.common.utils.helpers import create_table
 from nncf.config.extractors import extract_algo_specific_config
 from nncf.config.schemata.defaults import PRUNE_BATCH_NORMS
 from nncf.config.schemata.defaults import PRUNE_DOWNSAMPLE_CONVS
@@ -88,10 +88,11 @@ class BasePruningAlgoBuilder(PTCompressionAlgorithmBuilder):
         params.setdefault("prune_first_conv", True)
         params.setdefault("prune_downsample_convs", True)
         if params.get("all_weights") is False:
-            raise Exception(
+            msg = (
                 "For LeGR pruning the `all_weights` config parameter be set to `true`."
                 "Adjust the config accordingly if you want to proceed."
             )
+            raise Exception(msg)
         params.setdefault("all_weights", True)
 
     def _get_transformation_layout(self, target_model: NNCFNetwork) -> PTTransformationLayout:
@@ -236,7 +237,8 @@ class BasePruningAlgoController(PTCompressionAlgorithmController):
         pruning_target = params.get("pruning_target", None)
         pruning_flops_target = params.get("pruning_flops_target", None)
         if pruning_target and pruning_flops_target:
-            raise ValueError("Only one parameter from 'pruning_target' and 'pruning_flops_target' can be set.")
+            msg = "Only one parameter from 'pruning_target' and 'pruning_flops_target' can be set."
+            raise ValueError(msg)
         if pruning_flops_target:
             self.prune_flops = True
 
@@ -264,17 +266,16 @@ class BasePruningAlgoController(PTCompressionAlgorithmController):
         """
         Creates a table with layer pruning level statistics
         """
-        table = Texttable()
-        table.set_cols_width([33, 20, 6, 8])
         header = ["Name", "Weight's shape", "Bias shape", "Layer PR"]
-        data = [header]
+        rows_data = []
         for minfo in self.pruned_module_groups_info.get_all_nodes():
-            drow = {h: 0 for h in header}
-            drow["Name"] = str(minfo.module_scope)
-            drow["Weight's shape"] = list(minfo.module.weight.size())
-            drow["Bias shape"] = list(minfo.module.bias.size()) if minfo.module.bias is not None else []
-            drow["Layer PR"] = self.pruning_level_for_mask(minfo)
-            row = [drow[h] for h in header]
-            data.append(row)
-        table.add_rows(data)
-        return table
+            rows_data.append(
+                [
+                    str(minfo.module_scope),
+                    list(minfo.module.weight.size()),
+                    list(minfo.module.bias.size()) if minfo.module.bias is not None else [],
+                    self.pruning_level_for_mask(minfo),
+                ]
+            )
+
+        return create_table(header, rows_data, max_col_widths=[33, 20, 6, 8])

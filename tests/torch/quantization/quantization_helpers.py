@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -19,11 +19,11 @@ def compare_multi_gpu_dump(config, dump_dir, get_path_by_rank_fn):
     mismatching = False
     ref_file_path = get_path_by_rank_fn(dump_dir, 0)
     with ref_file_path.open("rb") as ref_scale_file:
-        ref_data = torch.load(ref_scale_file)
+        ref_data = torch.load(ref_scale_file, weights_only=False)
         for other_rank in range(1, config.world_size):
             other_file_path = get_path_by_rank_fn(dump_dir, other_rank)
             with other_file_path.open("rb") as in_file:
-                data_to_compare = torch.load(in_file)
+                data_to_compare = torch.load(in_file, weights_only=False)
                 for ref_tuple, tuple_to_compare in zip(ref_data, data_to_compare):
                     for ref_info, info_to_compare in zip(ref_tuple, tuple_to_compare):
                         if torch.tensor(ref_info != info_to_compare).sum():
@@ -63,7 +63,7 @@ def get_squeezenet_quantization_config(image_size=32, batch_size=3):
 
 def distributed_init_test_default(gpu, ngpus_per_node, config):
     config.batch_size = 3
-    config.workers = 0  #  workaround for the pytorch multiprocessingdataloader issue/
+    config.workers = 0  # workaround for the pytorch multiprocessingdataloader issue/
     config.gpu = gpu
     config.ngpus_per_node = ngpus_per_node
     config.rank = gpu

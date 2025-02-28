@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -14,7 +14,7 @@ from typing import List, Type
 import numpy as np
 import openvino.runtime as ov
 import pytest
-from openvino.runtime import opset9 as opset
+from openvino.runtime import opset13 as opset
 
 from nncf import Dataset
 from nncf.common.graph.transformations.commands import TargetPoint
@@ -37,7 +37,7 @@ CONV_NODE_NAME = "Conv1"
 INPUT_SHAPE = [1, 3, 3, 3]
 
 
-def get_StatisticAgregatorTestModel(input_shape, kernel):
+def get_StatisticAggregatorTestModel(input_shape, kernel):
     input_1 = opset.parameter(input_shape, name=INPUT_NAME)
     strides = [1, 1]
     pads = [0, 0]
@@ -50,7 +50,8 @@ def get_StatisticAgregatorTestModel(input_shape, kernel):
 
 
 class TestStatisticsAggregator(TemplateTestStatisticsAggregator):
-    def get_min_max_algo_backend_cls(self) -> Type[OVMinMaxAlgoBackend]:
+    @staticmethod
+    def get_min_max_algo_backend_cls() -> Type[OVMinMaxAlgoBackend]:
         return OVMinMaxAlgoBackend
 
     def get_bias_correction_algo_backend_cls(self) -> Type[OVBiasCorrectionAlgoBackend]:
@@ -62,7 +63,7 @@ class TestStatisticsAggregator(TemplateTestStatisticsAggregator):
     def get_backend_model(self, dataset_samples):
         sample = dataset_samples[0].reshape(INPUT_SHAPE[1:])
         conv_w = self.dataset_samples_to_conv_w(sample)
-        return get_StatisticAgregatorTestModel(INPUT_SHAPE, conv_w)
+        return get_StatisticAggregatorTestModel(INPUT_SHAPE, conv_w)
 
     @pytest.fixture(scope="session")
     def test_params(self):
@@ -82,7 +83,8 @@ class TestStatisticsAggregator(TemplateTestStatisticsAggregator):
     def get_dataset(self, samples):
         return Dataset(samples, lambda data: {INPUT_NAME: data})
 
-    def get_target_point(self, target_type: TargetType) -> TargetPoint:
+    @staticmethod
+    def get_target_point(target_type: TargetType) -> TargetPoint:
         target_node_name = INPUT_NAME
         port_id = 0
         if target_type == TargetType.OPERATION_WITH_WEIGHTS:
@@ -101,10 +103,6 @@ class TestStatisticsAggregator(TemplateTestStatisticsAggregator):
             dataset_samples[0][0, i, 0, 0] = value["max"]
             dataset_samples[0][0, i, 0, 1] = value["min"]
         return dataset_samples
-
-    @pytest.fixture
-    def is_stat_in_shape_of_scale(self) -> bool:
-        return True
 
     @pytest.fixture
     def is_backend_support_custom_estimators(self) -> bool:

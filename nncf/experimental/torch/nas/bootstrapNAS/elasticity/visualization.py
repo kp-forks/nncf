@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -12,14 +12,15 @@ from typing import Optional
 
 import networkx as nx
 
+import nncf
 from nncf.common.graph import NNCFNode
 from nncf.common.graph import NNCFNodeName
 from nncf.common.pruning.utils import get_input_masks
 from nncf.experimental.torch.nas.bootstrapNAS.elasticity.elastic_width import ElasticWidthHandler
 from nncf.experimental.torch.nas.bootstrapNAS.elasticity.multi_elasticity_handler import MultiElasticityHandler
 from nncf.torch.graph.graph import PTNNCFGraph
-from nncf.torch.graph.operator_metatypes import PTDepthwiseConv2dSubtype
 from nncf.torch.graph.operator_metatypes import PTModuleConv2dMetatype
+from nncf.torch.graph.operator_metatypes import PTModuleDepthwiseConv2dSubtype
 
 
 class SubnetGraph:
@@ -37,7 +38,7 @@ class SubnetGraph:
             color = None
             if metatype == PTModuleConv2dMetatype:
                 color = "lightblue"
-            if metatype == PTDepthwiseConv2dSubtype:
+            if metatype == PTModuleDepthwiseConv2dSubtype:
                 operator_name = f"DW_{operator_name}"
                 color = "purple"
 
@@ -90,6 +91,6 @@ class SubnetGraph:
         try:
             propagation_graph: PTNNCFGraph = width_handler.propagation_graph
             result = propagation_graph.get_node_by_name(node_name)
-        except RuntimeError:
+        except nncf.InternalError:
             result = None
         return result

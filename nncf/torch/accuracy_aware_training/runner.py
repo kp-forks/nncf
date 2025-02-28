@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -122,7 +122,7 @@ class PTAccuracyAwareTrainingRunner(BaseAccuracyAwareTrainingRunner):
         if self._load_checkpoint_fn is not None:
             self._load_checkpoint_fn(model, checkpoint_path)
         else:
-            resuming_checkpoint = torch.load(checkpoint_path, map_location="cpu")
+            resuming_checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
             resuming_model_state_dict = resuming_checkpoint.get("state_dict", resuming_checkpoint)
             load_state(model, resuming_model_state_dict, is_resume=True)
 
@@ -131,14 +131,12 @@ class PTAccuracyAwareTrainingRunner(BaseAccuracyAwareTrainingRunner):
         return osp.join(self._checkpoint_save_dir, f'acc_aware_checkpoint_{"best" if is_best else "last"}{extension}')
 
     def add_tensorboard_scalar(self, key, data, step):
-        if is_main_process():
-            if self.verbose and self._tensorboard_writer is not None:
-                self._tensorboard_writer.add_scalar(key, data, step)
+        if is_main_process() and self.verbose and self._tensorboard_writer is not None:
+            self._tensorboard_writer.add_scalar(key, data, step)
 
     def add_tensorboard_image(self, key, data, step):
-        if is_main_process():
-            if self.verbose and self._tensorboard_writer is not None:
-                self._tensorboard_writer.add_image(key, ToTensor()(data), step)
+        if is_main_process() and self.verbose and self._tensorboard_writer is not None:
+            self._tensorboard_writer.add_image(key, ToTensor()(data), step)
 
 
 class PTAdaptiveCompressionLevelTrainingRunner(
@@ -169,6 +167,7 @@ class PTAdaptiveCompressionLevelTrainingRunner(
         base_path = osp.join(self._checkpoint_save_dir, "acc_aware_checkpoint")
         if is_best:
             if compression_rate is None:
-                raise ValueError("Compression rate cannot be None")
+                msg = "Compression rate cannot be None"
+                raise ValueError(msg)
             return f"{base_path}_best_{compression_rate:.3f}{extension}"
         return f"{base_path}_last{extension}"

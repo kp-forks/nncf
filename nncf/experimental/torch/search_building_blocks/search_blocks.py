@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -78,7 +78,7 @@ class BuildingBlock:
         return str(self)
 
     def __str__(self) -> str:
-        return "[START NODE: {}, END_NODE: {}]".format(self.start_node_name, self.end_node_name)
+        return f"[START NODE: {self.start_node_name}, END_NODE: {self.end_node_name}]"
 
     def get_state(self) -> Dict[str, Any]:
         """
@@ -304,7 +304,7 @@ def get_potential_candidate_for_block(search_graph: SearchGraph) -> Tuple[ShapeV
 
 def itemgetter_force_tuple(*indexes):
     """
-    itemgetter wrapper that always returns a tuple. The original function may return both: iterable and a single
+    Itemgetter wrapper that always returns a tuple. The original function may return both: iterable and a single
     non-iterable element, which is not convenient in the general case.
     """
     getter = itemgetter(*indexes)
@@ -372,10 +372,11 @@ def get_building_blocks(
       does not lead to duplicate activation layers
     """
     if min_block_size > max_block_size:
-        raise AttributeError(
+        msg = (
             f"Minimal value for block size {min_block_size} can not be more than maximum one "
             f"{max_block_size}. Change max_block_size or min_block_size."
         )
+        raise AttributeError(msg)
     orig_graph = compressed_model.nncf.get_original_graph()  # PTNNCFGraph
     blocks = get_potential_building_blocks(orig_graph, hw_fused_ops, min_block_size, max_block_size)
     sorted_blocks = sorted(blocks, key=cmp_to_key(compare_for_building_block))
@@ -413,7 +414,7 @@ def get_potential_building_blocks(orig_graph: NNCFGraph, hw_fused_ops: bool, min
     for shape, first_skipped_nodes in act_input_shape.items():
         for first_skipped_node in first_skipped_nodes:
             previous_nodes = sgraph.get_prev_nodes(first_skipped_node.node_key)
-            if first_skipped_node.node_type == IgnoredNameOperators or len(previous_nodes) != 1:
+            if first_skipped_node.node_type in IgnoredNameOperators or len(previous_nodes) != 1:
                 continue
             for end_node in act_output_shape[shape]:
                 if end_node.main_id <= first_skipped_node.main_id:
@@ -657,17 +658,17 @@ def get_all_node_op_addresses_in_block(graph: NNCFGraph, block: BuildingBlock) -
 
 
 def get_all_modules_in_blocks(
-    compressed_model: NNCFNetwork, op_adresses_in_blocks: Set[OperationAddress]
+    compressed_model: NNCFNetwork, op_addresses_in_blocks: Set[OperationAddress]
 ) -> List[torch.nn.Module]:
     """
     Returns set of all modules included in the block.
 
     :param compressed_model: Target model.
-    :param op_adresses_in_blocks: Set of operation addresses for building block.
+    :param op_addresses_in_blocks: Set of operation addresses for building block.
     :return: List of module for building block.
     """
     modules = []
-    for op_address in op_adresses_in_blocks:
+    for op_address in op_addresses_in_blocks:
         if op_address.operator_name in NNCF_MODULES_OP_NAMES:
             modules.append(compressed_model.nncf.get_module_by_scope(op_address.scope_in_model))
     return modules

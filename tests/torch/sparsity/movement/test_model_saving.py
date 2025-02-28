@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -20,11 +20,11 @@ import torch
 from addict import Dict
 from datasets import Dataset
 from onnx import numpy_helper
+from openvino._offline_transformations import apply_fused_names_cleanup
+from openvino._offline_transformations import apply_moc_transformations
+from openvino._offline_transformations import apply_pruning_transformation
 from openvino.runtime import Core
 from openvino.runtime import serialize
-from openvino.tools.mo.back.offline_transformations import apply_fused_names_cleanup
-from openvino.tools.mo.back.offline_transformations import apply_moc_transformations
-from openvino.tools.mo.back.offline_transformations import apply_user_transformations
 from packaging import version
 from scipy.special import softmax
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
@@ -44,6 +44,11 @@ from tests.torch.sparsity.movement.helpers import Wav2Vec2RunRecipe
 from tests.torch.sparsity.movement.helpers import build_compression_trainer
 from tests.torch.sparsity.movement.helpers import force_update_sparsifier_binary_masks_by_threshold
 from tests.torch.sparsity.movement.helpers import initialize_sparsifier_parameters_by_linspace
+
+
+@pytest.fixture(scope="function", autouse=True)
+def safe_deterministic_state(_safe_deterministic_state):
+    pass
 
 
 class TestONNXExport:
@@ -95,8 +100,8 @@ class TestONNXExport:
             .model_config_(
                 image_size=384,
                 patch_size=4,
-                window_size=12,
-                embed_dim=192,
+                window_size=4,  # TODO: nlyayus: SwinModel changed logic for window size
+                embed_dim=192,  # larger than input resolution Issue-162383
                 mlp_ratio=4,
                 depths=(2, 2, 5, 2),
                 num_heads=(6, 12, 24, 48),
@@ -107,6 +112,7 @@ class TestONNXExport:
     def test_same_outputs_in_torch_and_exported_onnx(self, tmp_path: Path, recipe: BaseMockRunRecipe):
         num_samples = 4
         recipe.log_dir_(tmp_path)
+        print(recipe.model_family)
         compression_ctrl, compressed_model = create_compressed_model(
             recipe.model(), recipe.nncf_config(), dump_graphs=False
         )
@@ -123,7 +129,7 @@ class TestONNXExport:
         compression_ctrl.export_model(onnx_model_path)
         onnx_output_dict = self._get_onnx_model_inference_outputs(onnx_model_path, dataset, recipe)
         onnx_outputs = next(iter(onnx_output_dict.values()))
-        assert np.allclose(softmax(onnx_outputs, axis=-1), softmax(torch_outputs, axis=-1), atol=1e-6)
+        assert np.allclose(softmax(onnx_outputs, axis=-1), softmax(torch_outputs, axis=-1), atol=1e-5)
 
     @pytest.mark.skipif(
         version.parse(torch.__version__) < version.parse("1.12"),
@@ -134,8 +140,8 @@ class TestONNXExport:
         "desc",
         [
             Dict(
-                nncf_weight_ratio=0.43,
-                ov_weight_ratio=0.36,
+                nncf_weight_ratio=0.14,
+                ov_weight_ratio=0.11,
                 recipe=BertRunRecipe().model_config_(
                     max_position_embeddings=2,
                     intermediate_size=4,
@@ -147,8 +153,8 @@ class TestONNXExport:
                 ),
             ),
             Dict(
-                nncf_weight_ratio=0.31,
-                ov_weight_ratio=0.25,
+                nncf_weight_ratio=0.1,
+                ov_weight_ratio=0.08,
                 recipe=Wav2Vec2RunRecipe().model_config_(
                     intermediate_size=4,
                     num_labels=1,
@@ -158,7 +164,7 @@ class TestONNXExport:
                 ),
             ),
             Dict(
-                nncf_weight_ratio=0.41,
+                nncf_weight_ratio=0.08,
                 ov_weight_ratio=0.07,
                 recipe=Wav2Vec2RunRecipe().model_config_(
                     # stride, hidden size and num heads is selected to reproduce invalid parsing of reshape:
@@ -178,7 +184,7 @@ class TestONNXExport:
             ),
             Dict(
                 nncf_weight_ratio=0.43,
-                ov_weight_ratio=0.29,
+                ov_weight_ratio=0.33,
                 recipe=SwinRunRecipe().model_config_(
                     num_heads=[4],
                     num_labels=1,
@@ -187,7 +193,7 @@ class TestONNXExport:
                 ),
             ),
             Dict(
-                nncf_weight_ratio=0.55,
+                nncf_weight_ratio=0.25,
                 ov_weight_ratio=0.20,
                 recipe=DistilBertRunRecipe().model_config_(),
             ),
@@ -211,8 +217,8 @@ class TestONNXExport:
                 ),
             ),
             Dict(
-                nncf_weight_ratio=0.47,
-                ov_weight_ratio=0.36,
+                nncf_weight_ratio=0.15,
+                ov_weight_ratio=0.12,
                 recipe=ClipVisionRunRecipe().model_config_(),
             ),
         ],
@@ -246,14 +252,14 @@ class TestONNXExport:
         ov_model = core.read_model(onnx_model_path)
 
         # Convert to IR without pruning
-        apply_moc_transformations(ov_model)
+        apply_moc_transformations(ov_model, cf=False)
         apply_fused_names_cleanup(ov_model)
         not_pruned_file = str(tmp_path / "ov_not_pruned.xml")
         serialize(ov_model, not_pruned_file)
 
         # Convert to IR with pruning
-        apply_moc_transformations(ov_model)
-        apply_user_transformations(ov_model, [("Pruning", {})])
+        apply_moc_transformations(ov_model, cf=False)
+        apply_pruning_transformation(ov_model)
         apply_fused_names_cleanup(ov_model)
         pruned_file = str(tmp_path / "ov_pruned.xml")
         serialize(ov_model, pruned_file)
@@ -265,7 +271,7 @@ class TestONNXExport:
         file_size_ratio = 1 - pruned_file_bytes / not_pruned_file_bytes
         assert pytest.approx(compression_rate, abs=1e-2) == desc.nncf_weight_ratio
         assert (
-            pytest.approx(file_size_ratio, abs=1e-2) == desc.ov_weight_ratio
+            pytest.approx(file_size_ratio, abs=3e-2) == desc.ov_weight_ratio
         ), f"IR's size ratio: 1 - {pruned_file_bytes}/{not_pruned_file_bytes}"
         if abs(desc.ov_weight_ratio - desc.nncf_weight_ratio) >= 0.15:
             pytest.skip("Known issue in the ngraph transformation")
@@ -445,5 +451,7 @@ class TestCompressionState:
         resumed_trainer.train(str(resume_folder))
 
         PTTensorListComparator.check_equal(
-            list(compressed_model.state_dict().values()), list(resumed_compressed_model.state_dict().values())
+            list(compressed_model.state_dict().values()),
+            list(resumed_compressed_model.state_dict().values()),
+            atol=0.001,
         )

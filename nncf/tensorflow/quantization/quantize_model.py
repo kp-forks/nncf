@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -9,10 +9,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional
 
 import tensorflow as tf
 
+import nncf
 from nncf.common.initialization.dataloader import NNCFDataLoader
 from nncf.common.quantization.structs import QuantizationPreset
 from nncf.config import NNCFConfig
@@ -21,12 +22,13 @@ from nncf.config.structures import QuantizationRangeInitArgs
 from nncf.data import Dataset
 from nncf.data.dataset import DataProvider
 from nncf.parameters import ModelType
+from nncf.parameters import QuantizationMode
 from nncf.parameters import TargetDevice
 from nncf.quantization.advanced_parameters import AdvancedQuantizationParameters
 from nncf.quantization.advanced_parameters import apply_advanced_parameters_to_config
 from nncf.scopes import IgnoredScope
 from nncf.scopes import convert_ignored_scope_to_list
-from nncf.tensorflow.helpers.model_creation import create_compressed_model
+from nncf.tensorflow.helpers.model_creation import create_compressed_model_impl
 
 DEFAULT_RANGE_TYPE = "mean_min_max"
 
@@ -133,10 +135,11 @@ def _create_nncf_config(
 def quantize_impl(
     model: tf.Module,
     calibration_dataset: Dataset,
-    preset: Union[QuantizationPreset, None],
-    target_device: TargetDevice,
-    subset_size: int,
-    fast_bias_correction: bool,
+    mode: Optional[QuantizationMode] = None,
+    preset: Optional[QuantizationPreset] = None,
+    target_device: TargetDevice = TargetDevice.ANY,
+    subset_size: int = 300,
+    fast_bias_correction: bool = True,
     model_type: Optional[ModelType] = None,
     ignored_scope: Optional[IgnoredScope] = None,
     advanced_parameters: Optional[AdvancedQuantizationParameters] = None,
@@ -145,17 +148,25 @@ def quantize_impl(
     Implementation of the `quantize()` method for the TensorFlow backend.
     """
     if model_type is not None:
-        raise ValueError(f"model_type={model_type} is not supported")
+        msg = f"model_type={model_type} is not supported"
+        raise ValueError(msg)
     if fast_bias_correction is False:
-        raise ValueError(f"fast_bias_correction={fast_bias_correction} is not supported")
+        msg = f"fast_bias_correction={fast_bias_correction} is not supported"
+        raise ValueError(msg)
     if ignored_scope is not None and ignored_scope.types:
-        raise RuntimeError(
+        msg = (
             "Quantization algorithm form the TensorFlow backend "
             "does not support operation types in the ignored "
             "scopes yet"
         )
+        raise nncf.InternalError(msg)
     if target_device == TargetDevice.CPU_SPR:
-        raise RuntimeError("target_device == CPU_SPR is not supported.")
+        msg = "target_device == CPU_SPR is not supported."
+        raise nncf.InternalError(msg)
+
+    if mode is not None:
+        msg = f"mode={mode} is not supported"
+        raise ValueError(msg)
 
     if preset is None:
         preset = QuantizationPreset.PERFORMANCE
@@ -170,7 +181,12 @@ def quantize_impl(
         ]
     )
 
-    compression_ctrl, compressed_model = create_compressed_model(model=model, config=nncf_config)
-    stripped_model = compression_ctrl.strip_model(compressed_model)
+    compression_ctrl, compressed_model = create_compressed_model_impl(model=model, config=nncf_config)
 
-    return stripped_model
+    # NOTE: We set the config here to properly save/load the quantized model during training into tf.train.Checkpoint.
+    # You can obtain that config via the nncf.tensorflow.get_config() method and save/load it to/from
+    # tf.train.Checkpoint using the nncf.tensorflow.ConfigState class.
+    config = compression_ctrl.get_compression_state()["builder_state"]
+    setattr(compressed_model, "_nncf_config", config)
+
+    return compressed_model

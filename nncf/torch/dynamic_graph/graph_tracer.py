@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -8,7 +8,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from copy import deepcopy
 from typing import Any, Callable, Dict, Optional, Tuple, TypeVar
 
 import torch
@@ -19,6 +18,7 @@ from nncf.torch.dynamic_graph.graph import DynamicGraph
 from nncf.torch.dynamic_graph.io_handling import FillerInputInfo
 from nncf.torch.dynamic_graph.io_handling import LoaderInputInfo
 from nncf.torch.dynamic_graph.io_handling import ModelInputInfo
+from nncf.torch.dynamic_graph.wrappers import wrap_parameters
 from nncf.torch.utils import get_model_device
 from nncf.torch.utils import is_multidevice
 
@@ -28,10 +28,12 @@ class GraphTracer:
         self.custom_forward_fn = custom_forward_fn
 
     def trace_graph(
-        self, model: torch.nn.Module, context_to_use: Optional[TracingContext] = None, as_eval: bool = False
+        self,
+        model: torch.nn.Module,
+        context_to_use: Optional[TracingContext] = None,
+        as_eval: bool = False,
+        trace_parameters: bool = False,
     ) -> DynamicGraph:
-        sd = deepcopy(model.state_dict())
-
         if context_to_use is None:
             context_to_use = TracingContext()
 
@@ -41,12 +43,14 @@ class GraphTracer:
         with context_to_use as _ctx:
             _ctx.base_module_thread_local_replica = model
             with torch.no_grad():
+                if trace_parameters:
+                    wrap_parameters(model)
+
                 if as_eval:
                     with training_mode_switcher(model, is_training=False):
                         self.custom_forward_fn(model)
                 else:
                     self.custom_forward_fn(model)
-        model.load_state_dict(sd)
 
         context_to_use.disable_trace_dynamic_graph()
         return context_to_use.graph

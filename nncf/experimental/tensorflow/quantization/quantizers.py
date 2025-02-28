@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -13,7 +13,7 @@ from typing import Dict, List, Optional
 
 import tensorflow as tf
 
-from nncf.common.quantization.structs import QuantizationMode
+from nncf.common.quantization.structs import QuantizationScheme as QuantizationMode
 from nncf.common.utils.registry import Registry
 from nncf.tensorflow.layers.operation import InputType
 from nncf.tensorflow.quantization.quantizers import AsymmetricQuantizer
@@ -51,9 +51,8 @@ class SymmetricQuantizerV2(SymmetricQuantizer):
         :return: Quantizer variables.
         """
         if self.per_channel and (self.input_shape is None or self.channel_axes is None):
-            raise ValueError(
-                "The `input_shape` and `channel_axes` arguments are required when using per-channel quantization."
-            )
+            msg = "The `input_shape` and `channel_axes` arguments are required when using per-channel quantization."
+            raise ValueError(msg)
         prefix = self.name
         return self._create_variables(layer, self.input_shape, self.channel_axes, prefix)
 
@@ -86,9 +85,8 @@ class AsymmetricQuantizerV2(AsymmetricQuantizer):
         :return: Quantizer variables.
         """
         if self.per_channel and (self.input_shape is None or self.channel_axes is None):
-            raise ValueError(
-                "The `input_shape` and `channel_axes` arguments are required when using per-channel quantization."
-            )
+            msg = "The `input_shape` and `channel_axes` arguments are required when using per-channel quantization."
+            raise ValueError(msg)
         prefix = self.name
         return self._create_variables(layer, self.input_shape, self.channel_axes, prefix)
 

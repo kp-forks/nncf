@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -10,10 +10,15 @@
 # limitations under the License.
 
 from functools import partial
-from typing import List, Set
+from typing import List, Set, Tuple, Type, Union
 
 from nncf.common.graph import NNCFGraph
 from nncf.common.graph import NNCFNode
+from nncf.common.graph.layer_attributes import ConvolutionLayerAttributes
+from nncf.common.graph.layer_attributes import GenericWeightedLayerAttributes
+from nncf.common.graph.layer_attributes import GroupNormLayerAttributes
+from nncf.common.graph.layer_attributes import LinearLayerAttributes
+from nncf.common.graph.layer_attributes import WeightedLayerAttributes
 from nncf.common.graph.operator_metatypes import OperatorMetatype
 from nncf.common.logging import nncf_logger
 from nncf.common.pruning.utils import traverse_function
@@ -89,7 +94,9 @@ def get_split_axis(input_shapes: List[List[int]], output_shapes: List[List[int]]
 
 
 def get_number_of_quantized_ops(
-    graph: NNCFGraph, quantizer_metatypes: List[OperatorMetatype], quantizable_metatypes: List[OperatorMetatype]
+    graph: NNCFGraph,
+    quantizer_metatypes: List[Type[OperatorMetatype]],
+    quantizable_metatypes: List[Type[OperatorMetatype]],
 ) -> int:
     """
     Returns the number of quantized operations in the graph.
@@ -114,3 +121,94 @@ def get_number_of_quantized_ops(
             else:
                 nodes_to_see.extend(graph.get_next_nodes(node))
     return len(quantized_ops)
+
+
+def get_reduction_axes(
+    channel_axes: Union[List[int], Tuple[int, ...]], shape: Union[List[int], Tuple[int, ...]]
+) -> Tuple[int, ...]:
+    """
+    Returns filtered reduction axes without axes that correspond to channels.
+
+    :param channel_axes: Channel axes.
+    :param shape: Shape that need to be filtered.
+    :return: Reduction axes.
+    """
+    reduction_axes = list(range(len(shape)))
+    for channel_axis in sorted(channel_axes, reverse=True):
+        del reduction_axes[channel_axis]
+    return tuple(reduction_axes)
+
+
+def get_weight_shape_legacy(layer_attributes: WeightedLayerAttributes) -> List[int]:
+    """
+    Returns hard-coded weights shape layout for the given layer attributes.
+    Applicable only for eager PyTorch and Tensorflow models.
+
+    :param layer_attributes: Layer attributes of a NNCFNode.
+    :return: Weights shape layout.
+    """
+    if isinstance(layer_attributes, LinearLayerAttributes):
+        return [layer_attributes.out_features, layer_attributes.in_features]
+
+    if isinstance(layer_attributes, ConvolutionLayerAttributes):
+        if not layer_attributes.transpose:
+            return [
+                layer_attributes.out_channels,
+                layer_attributes.in_channels // layer_attributes.groups,
+                *layer_attributes.kernel_size,
+            ]
+        return [
+            layer_attributes.in_channels,
+            layer_attributes.out_channels // layer_attributes.groups,
+            *layer_attributes.kernel_size,
+        ]
+
+    if isinstance(layer_attributes, GroupNormLayerAttributes):
+        return [layer_attributes.num_channels]
+
+    assert isinstance(layer_attributes, GenericWeightedLayerAttributes)
+    return layer_attributes.weight_shape
+
+
+def get_target_dim_for_compression_legacy(layer_attributes: WeightedLayerAttributes) -> int:
+    """
+    Returns hard-coded target dim for compression for the given layer attributes.
+    Applicable only for eager PyTorch and Tensorflow models.
+
+    :param layer_attributes: Layer attributes of a NNCFNode.
+    :return: Target dim for compression.
+    """
+    if isinstance(layer_attributes, ConvolutionLayerAttributes):
+        # Always quantize per each "out" channel
+        return 1 if layer_attributes.transpose else 0
+
+    else:
+        assert isinstance(
+            layer_attributes, (GenericWeightedLayerAttributes, LinearLayerAttributes, GroupNormLayerAttributes)
+        )
+        return 0
+
+
+def get_bias_shape_legacy(layer_attributes: WeightedLayerAttributes) -> int:
+    """
+    Returns hard-coded bias shape for the given linear layer attributes.
+    Applicable only for eager PyTorch and Tensorflow models.
+
+    :param layer_attributes: Linear layer attributes of a NNCFNode.
+    :return: Correspondent bias shape.
+    """
+    assert isinstance(layer_attributes, LinearLayerAttributes)
+    return layer_attributes.out_features if layer_attributes.with_bias is True else 0
+
+
+def get_num_filters_legacy(layer_attributes: WeightedLayerAttributes) -> int:
+    """
+    Returns hard-coded number of filters for the given layer attributes.
+    Applicable only for eager PyTorch and Tensorflow models.
+
+    :param layer_attributes: Layer attributes of a NNCFNode.
+    :return: Correspondent number of filters.
+    """
+    assert isinstance(layer_attributes, WeightedLayerAttributes)
+    weight_shape = get_weight_shape_legacy(layer_attributes)
+    return weight_shape[get_target_dim_for_compression_legacy(layer_attributes)]

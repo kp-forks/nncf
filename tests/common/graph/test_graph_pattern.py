@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -11,6 +11,7 @@
 
 import copy
 import itertools
+from pathlib import Path
 
 import networkx as nx
 
@@ -213,3 +214,10 @@ def test_join_pattern_with_special_input_node():
             ref_pattern.add_edge(node, added_node)
 
     assert pattern == ref_pattern
+
+
+def test_dump(tmp_path: Path):
+    path_dot = tmp_path / "pattern.dot"
+    TestPattern.first_pattern.dump_graph(path_dot)
+    assert path_dot.is_file()
+    path_dot.unlink()

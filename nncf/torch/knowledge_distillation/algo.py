@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -40,8 +40,9 @@ class KnowledgeDistillationBuilder(PTCompressionAlgorithmBuilder):
         self.kd_type = self._algo_config.get("type")
         self.scale = self._algo_config.get("scale", KNOWLEDGE_DISTILLATION_SCALE)
         self.temperature = self._algo_config.get("temperature", KNOWLEDGE_DISTILLATION_TEMPERATURE)
-        if "temperature" in self._algo_config.keys() and self.kd_type == "mse":
-            raise ValueError("Temperature shouldn't be stated for MSE Loss (softmax only feature)")
+        if "temperature" in self._algo_config and self.kd_type == "mse":
+            msg = "Temperature shouldn't be stated for MSE Loss (softmax only feature)"
+            raise ValueError(msg)
 
     def _get_transformation_layout(self, target_model: NNCFNetwork) -> PTTransformationLayout:
         self.original_model = deepcopy(target_model).nncf.get_clean_shallow_copy()

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -18,6 +18,7 @@ from nncf import NNCFConfig
 from nncf.api.compression import CompressionStage
 from nncf.common.accuracy_aware_training.training_loop import ADAPTIVE_COMPRESSION_CONTROLLERS
 from nncf.common.graph import NNCFNode
+from nncf.common.graph.utils import get_weight_shape_legacy
 from nncf.common.schedulers import StubCompressionScheduler
 from nncf.common.sparsity.schedulers import SPARSITY_SCHEDULERS
 from nncf.common.sparsity.statistics import RBSparsityStatistics
@@ -44,7 +45,7 @@ from nncf.torch.utils import get_world_size
 class RBSparsityBuilder(BaseSparsityAlgoBuilder):
     def create_weight_sparsifying_operation(self, target_module_node: NNCFNode, compression_lr_multiplier: float):
         return RBSparsifyingWeight(
-            target_module_node.layer_attributes.get_weight_shape(),
+            get_weight_shape_legacy(target_module_node.layer_attributes),
             frozen=False,
             compression_lr_multiplier=compression_lr_multiplier,
         )
@@ -89,6 +90,10 @@ class RBSparsityController(BaseSparsityAlgoController):
             sparse_op = target_sparsified_module_info.operand
             self._loss.set_target_sparsity_loss(sparsity_level, sparse_op)
 
+    @property
+    def current_sparsity_level(self) -> float:
+        return self._loss.current_sparsity
+
     def compression_stage(self) -> CompressionStage:
         if self._mode == "local":
             return CompressionStage.FULLY_COMPRESSED
@@ -104,10 +109,11 @@ class RBSparsityController(BaseSparsityAlgoController):
 
     def distributed(self):
         if not dist.is_initialized():
-            raise KeyError(
+            msg = (
                 "Could not set distributed mode for the compression algorithm "
                 "because the default process group has not been initialized."
             )
+            raise KeyError(msg)
 
         if "cuda" in get_model_device(self._model).type:
             state = torch.cuda.get_rng_state()

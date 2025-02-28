@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -25,8 +25,7 @@ from nncf import NNCFConfig
 from nncf.api.compression import CompressionScheduler
 from nncf.common.hardware.config import HWConfigType
 from nncf.common.quantization.structs import NonWeightQuantizerId
-from nncf.common.quantization.structs import QuantizationMode
-from nncf.common.quantization.structs import QuantizerConfig
+from nncf.common.quantization.structs import QuantizationScheme as QuantizationMode
 from nncf.common.quantization.structs import WeightQuantizerId
 from nncf.common.utils.debug import nncf_debug
 from nncf.torch import create_compressed_model
@@ -36,11 +35,11 @@ from nncf.torch.checkpoint_loading import load_state
 from nncf.torch.compression_method_api import PTCompressionLoss
 from nncf.torch.dynamic_graph.scope import Scope
 from nncf.torch.dynamic_graph.scope import ScopeElement
+from nncf.torch.graph.transformations.commands import ExtraCompressionModuleType
 from nncf.torch.layers import NNCFConv2d
 from nncf.torch.model_creation import create_compression_algorithm_builder
 from nncf.torch.module_operations import UpdateInputs
 from nncf.torch.module_operations import UpdateWeight
-from nncf.torch.nncf_network import ExtraCompressionModuleType
 from nncf.torch.quantization.algo import QuantizationBuilder
 from nncf.torch.quantization.algo import QuantizationController
 from nncf.torch.quantization.layers import QUANTIZATION_MODULES
@@ -196,7 +195,7 @@ def test_can_load_quant_algo__with_defaults():
         quant_scope: Scope = deepcopy(module_scope)
         quant_scope.pop()
         quant_scope.push(ScopeElement("NNCFConv2d", "conv"))
-        assert quant_scope in quant_model_conv.keys()
+        assert quant_scope in quant_model_conv
 
         store = []
         for op in quant_model_conv[quant_scope].pre_ops.values():
@@ -219,7 +218,7 @@ def test_can_create_quant_loss_and_scheduler():
 
 
 def get_path_to_keys(tmp_path, rank):
-    return "{}_{}".format(tmp_path, str(rank))
+    return f"{tmp_path}_{str(rank)}"
 
 
 def activation_quantizers_dumping_worker(current_gpu, config, tmp_path):
@@ -229,9 +228,10 @@ def activation_quantizers_dumping_worker(current_gpu, config, tmp_path):
     print(path)
     with open(path, "w", encoding="utf8") as f:
         for aq_id in qctrl.non_weight_quantizers:
-            f.writelines("%s\n" % str(aq_id))
+            f.writelines(f"{str(aq_id)}\n")
 
 
+@pytest.mark.cuda
 def test_activation_quantizers_order_is_the_same__for_resnet50(tmp_path, runs_subprocess_in_precommit):
     if not torch.cuda.is_available():
         pytest.skip("Skipping CUDA test cases for CPU only setups")
@@ -244,10 +244,10 @@ def test_activation_quantizers_order_is_the_same__for_resnet50(tmp_path, runs_su
         activation_quantizers_dumping_worker, nprocs=ngpus_per_node, args=(config, tmp_path), join=True
     )
 
-    with open(get_path_to_keys(tmp_path, 0), "r", encoding="utf8") as f:
+    with open(get_path_to_keys(tmp_path, 0), encoding="utf8") as f:
         ref_list = f.readlines()
     for i in range(1, ngpus_per_node):
-        with open(get_path_to_keys(tmp_path, i), "r", encoding="utf8") as f:
+        with open(get_path_to_keys(tmp_path, i), encoding="utf8") as f:
             curr_list = f.readlines()
             assert curr_list == ref_list
 
@@ -427,62 +427,6 @@ def test_quantize_inputs():
         input_aq_id = next(iter(matches))
         quantizer = qctrl.non_weight_quantizers[input_aq_id].quantizer_module_ref
         assert isinstance(quantizer, SymmetricQuantizer)
-
-
-@pytest.mark.parametrize(
-    ("requanting_qconf", "base_qconf", "is_valid_requant"),
-    (
-        (QuantizerConfig(), QuantizerConfig(), True),
-        (QuantizerConfig(num_bits=8), QuantizerConfig(num_bits=6), False),
-        (QuantizerConfig(num_bits=6), QuantizerConfig(num_bits=8), True),
-        # Technically placing a per-channel quantization after a per-tensor should not break
-        # anything or limit the set of output values w.r.t to a single per-tensor quantizer.
-        (QuantizerConfig(num_bits=6, per_channel=True), QuantizerConfig(num_bits=6, per_channel=False), True),
-        (QuantizerConfig(num_bits=6, per_channel=False), QuantizerConfig(num_bits=6, per_channel=True), True),
-        (QuantizerConfig(num_bits=5, per_channel=True), QuantizerConfig(num_bits=6, per_channel=False), True),
-        (QuantizerConfig(num_bits=5, per_channel=False), QuantizerConfig(num_bits=6, per_channel=True), True),
-        (
-            QuantizerConfig(num_bits=5, mode=QuantizationMode.SYMMETRIC),
-            QuantizerConfig(num_bits=5, mode=QuantizationMode.ASYMMETRIC),
-            True,
-        ),
-        (
-            QuantizerConfig(num_bits=5, mode=QuantizationMode.ASYMMETRIC),
-            QuantizerConfig(num_bits=5, mode=QuantizationMode.SYMMETRIC),
-            False,
-        ),
-        (QuantizerConfig(signedness_to_force=True), QuantizerConfig(), True),
-        (QuantizerConfig(), QuantizerConfig(signedness_to_force=True), False),
-        (QuantizerConfig(signedness_to_force=False), QuantizerConfig(), True),
-        (QuantizerConfig(), QuantizerConfig(signedness_to_force=False), False),
-        (QuantizerConfig(signedness_to_force=True), QuantizerConfig(signedness_to_force=False), False),
-        (QuantizerConfig(signedness_to_force=False), QuantizerConfig(signedness_to_force=True), True),
-        (
-            QuantizerConfig(num_bits=4, mode=QuantizationMode.SYMMETRIC, per_channel=False),
-            QuantizerConfig(num_bits=8, mode=QuantizationMode.SYMMETRIC, per_channel=True),
-            True,
-        ),
-        (
-            QuantizerConfig(num_bits=4, mode=QuantizationMode.SYMMETRIC, per_channel=False),
-            QuantizerConfig(num_bits=8, mode=QuantizationMode.ASYMMETRIC, per_channel=False),
-            True,
-        ),
-        # Neither of the two configs here can requantize the other
-        (
-            QuantizerConfig(num_bits=6, mode=QuantizationMode.ASYMMETRIC),
-            QuantizerConfig(num_bits=8, mode=QuantizationMode.SYMMETRIC),
-            False,
-        ),
-        (
-            QuantizerConfig(num_bits=8, mode=QuantizationMode.SYMMETRIC),
-            QuantizerConfig(num_bits=6, mode=QuantizationMode.ASYMMETRIC),
-            False,
-        ),
-    ),
-)
-def test_quantizer_ordering(requanting_qconf: QuantizerConfig, base_qconf: QuantizerConfig, is_valid_requant: bool):
-    test_result = requanting_qconf.is_valid_requantization_for(base_qconf)
-    assert test_result == is_valid_requant
 
 
 class QuantizeOutputsTestModel(nn.Module):
@@ -803,7 +747,8 @@ class TestHalfPrecisionModels:
         compressed_model(inputs)
 
     @pytest.mark.parametrize(
-        "device", [pytest.param("cuda"), pytest.param("cpu", marks=pytest.mark.skip(reason="CVS-86697"))]
+        "device",
+        [pytest.param("cuda", marks=pytest.mark.cuda), pytest.param("cpu", marks=pytest.mark.skip(reason="CVS-86697"))],
     )
     def test_manual_partial_half_precision_model(self, initializing_config: NNCFConfig, device: str):
         model = TestHalfPrecisionModels.ModelWithManualPartialHalfPrecision()
@@ -821,11 +766,10 @@ class TestHalfPrecisionModels:
         # Should complete successfully, including init.
         compressed_model(inputs)
 
-    @pytest.mark.parametrize("device", ["cpu", "cuda"])
-    def test_external_autocast(self, initializing_config: NNCFConfig, device: str):
+    def test_external_autocast(self, initializing_config: NNCFConfig, use_cuda):
         model = TestHalfPrecisionModels.RegularModel()
         inputs = torch.ones([1, 1, 1, 1])
-        if device == "cuda":
+        if use_cuda:
             if not torch.cuda.is_available():
                 pytest.skip("CUDA not available")
             inputs = inputs.cuda()
@@ -879,7 +823,7 @@ def test_activation_ignored_scope(update_config_info, should_ignore_quantizers):
     train_loader = create_random_mock_dataloader(config, num_samples=10)
     config = register_default_init_args(config, train_loader)
     ctrl, _ = create_compressed_model(model, config)
-    assert Counter([item.target_node_name for item in ctrl.all_quantizations.keys()]) == Counter(ref_quantization_names)
+    assert Counter([item.target_node_name for item in ctrl.all_quantizations]) == Counter(ref_quantization_names)
 
 
 def test_sync_of_level_ranges_and_signed_parameter():
@@ -941,13 +885,15 @@ def test_can_quantize_user_module_with_addmm():
     create_compressed_model_and_algo_for_test(ModelWithUserModule(), nncf_config)
 
 
+@pytest.mark.nightly
+@pytest.mark.cuda
 def test_works_when_wrapped_with_dataparallel():
-    if not torch.cuda.is_available():
+    if not torch.cuda.is_available() and torch.cuda.device_count() > 1:
         pytest.xfail("The executing host must have > 1 CUDA GPU in order for this test to be relevant.")
 
-    model = SharedLayersModel()
+    model = SharedLayersModel().cuda()
     config = get_quantization_config_without_range_init(model_size=1)
     register_bn_adaptation_init_args(config)
     model, _ = create_compressed_model_and_algo_for_test(model, config)
-    model = torch.nn.DataParallel(model.cuda())
+    model = torch.nn.DataParallel(model)
     model(torch.ones([10, 1, 1, 1], device="cuda"))

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -12,8 +12,13 @@ import pytest
 import torch
 from packaging import version
 
+from nncf.torch import wrap_model
 from nncf.torch.dynamic_graph.context import TracingContext
+from nncf.torch.dynamic_graph.trace_tensor import TracedParameter
 from nncf.torch.dynamic_graph.trace_tensor import TracedTensor
+from nncf.torch.dynamic_graph.wrappers import wrap_parameters
+from nncf.torch.graph.transformations.commands import ExtraCompressionModuleType
+from tests.torch.helpers import BasicConvTestModel
 
 
 @pytest.mark.skipif(
@@ -82,6 +87,7 @@ class ModuleForTest(torch.nn.Module):
         super().__init__()
         self.conv2d = torch.nn.Conv2d(1, 1, 1)
         self.cached_tensor = None
+        self.weight = torch.nn.Parameter(torch.zeros([1, 2]))
 
     def forward(self, x):
         if self.cached_tensor is not None:
@@ -98,11 +104,16 @@ def test_traced_tensors_are_stripped_on_context_exit():
     module.train()
     tensor = torch.ones([1, 1, 1, 1])
     with TracingContext():
+        wrap_parameters(module)
         result = module(tensor)
         assert isinstance(module.cached_tensor, TracedTensor)
+        assert isinstance(module.weight, TracedParameter)
+        assert isinstance(module.conv2d.weight, TracedParameter)
         assert isinstance(result, TracedTensor)
     assert isinstance(module.cached_tensor, torch.Tensor)
     assert isinstance(result, torch.Tensor)
+    assert isinstance(module.weight, torch.nn.Parameter)
+    assert isinstance(module.conv2d.weight, torch.nn.Parameter)
 
 
 def test_no_cross_forward_run_dependency():
@@ -146,3 +157,14 @@ def test_nested_contexts(contexts):
         assert contexts[0]._threading.thread_local.nested_contexts_stack[0] is None
         assert len(contexts[0]._threading.thread_local.traced_tensor_weakrefs) > 0
     assert len(contexts[0]._threading.thread_local.traced_tensor_weakrefs) == 0
+
+
+@pytest.mark.parametrize("compression_model_type", ExtraCompressionModuleType)
+def test_not_trace_parameters_in_nncf_modules(compression_model_type):
+    model = wrap_model(BasicConvTestModel(), torch.ones(BasicConvTestModel.INPUT_SIZE), trace_parameters=True)
+    model.nncf.register_compression_module_type(compression_model_type)
+    model.nncf.add_compression_module("test", torch.nn.Conv2d(1, 1, 1), compression_model_type)
+
+    with TracingContext() as ctx:
+        wrap_parameters(model)
+        assert len(ctx._threading.thread_local.traced_tensor_weakrefs) == 2

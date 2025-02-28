@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -236,7 +236,7 @@ class BasePruningAlgoBuilder(TFCompressionAlgorithmBuilder):
     def _get_related_batchnorms(self, layer_name: str, group: Cluster, graph: NNCFGraph) -> List[NNCFNode]:
         """
         Returns List of batchnorm elements related to the layer.
-        Note: Single node per layer for shared bactchnorm layers
+        Note: Single node per layer for shared batchnorm layers
         """
         layer_nodes = [node_ for node_ in group.elements if node_.layer_name == layer_name]
         bn_nodes = []
@@ -312,7 +312,8 @@ class BasePruningAlgoController(BaseCompressionAlgorithmController, ABC):
         pruning_target = params.get("pruning_target", None)
         pruning_flops_target = params.get("pruning_flops_target", None)
         if pruning_target and pruning_flops_target:
-            raise ValueError("Only one parameter from 'pruning_target' and 'pruning_flops_target' can be set.")
+            msg = "Only one parameter from 'pruning_target' and 'pruning_flops_target' can be set."
+            raise ValueError(msg)
         if pruning_flops_target:
             self.prune_flops = True
 

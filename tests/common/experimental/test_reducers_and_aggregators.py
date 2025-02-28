@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -13,29 +13,37 @@ from abc import abstractmethod
 from dataclasses import dataclass
 from functools import partial
 from itertools import product
-from typing import Any, List, Optional, Tuple
+from typing import Any, Iterator, List, Optional, Tuple
 
 import numpy as np
 import pytest
 
+import nncf
 from nncf.common.graph.layer_attributes import Dtype
-from nncf.common.tensor_statistics.collectors import NNCFCollectorTensorProcessor
+from nncf.common.tensor import NNCFTensor
 from nncf.experimental.common.tensor_statistics.collectors import AggregationAxes
+from nncf.experimental.common.tensor_statistics.collectors import HAWQAggregator
 from nncf.experimental.common.tensor_statistics.collectors import MaxAggregator
+from nncf.experimental.common.tensor_statistics.collectors import MaxVarianceReducer
+from nncf.experimental.common.tensor_statistics.collectors import MeanAbsMaxReducer
 from nncf.experimental.common.tensor_statistics.collectors import MeanAggregator
 from nncf.experimental.common.tensor_statistics.collectors import MeanNoOutliersAggregator
+from nncf.experimental.common.tensor_statistics.collectors import MeanVarianceReducer
 from nncf.experimental.common.tensor_statistics.collectors import MedianAbsoluteDeviationAggregator
 from nncf.experimental.common.tensor_statistics.collectors import MedianAggregator
 from nncf.experimental.common.tensor_statistics.collectors import MedianNoOutliersAggregator
 from nncf.experimental.common.tensor_statistics.collectors import MinAggregator
 from nncf.experimental.common.tensor_statistics.collectors import NoopAggregator
 from nncf.experimental.common.tensor_statistics.collectors import PercentileAggregator
+from nncf.experimental.common.tensor_statistics.collectors import RawReducer
 from nncf.experimental.common.tensor_statistics.collectors import ShapeAggregator
+from nncf.experimental.common.tensor_statistics.collectors import ShapeReducer
+from nncf.tensor import functions as fns
 
-DEFALUT_3D_MEAN_VALUE = [[2503.125, -2493.75, 5009.375], [-4987.5, 7515.625, -7481.25], [10021.875, -9975.0, 12528.125]]
+DEFAULT_3D_MEAN_VALUE = [[2503.125, -2493.75, 5009.375], [-4987.5, 7515.625, -7481.25], [10021.875, -9975.0, 12528.125]]
 
 
-DEFALUT_3D_MEDIAN_VALUE = [[4.5, 5.0, 13.5], [10.0, 22.5, 15.0], [31.5, 20.0, 40.5]]
+DEFAULT_3D_MEDIAN_VALUE = [[4.5, 5.0, 13.5], [10.0, 22.5, 15.0], [31.5, 20.0, 40.5]]
 
 
 NO_OUTLIERS_DEFAULT_3D_MEAN_VALUE = [
@@ -47,6 +55,7 @@ NO_OUTLIERS_DEFAULT_3D_MEAN_VALUE = [
 
 NO_OUTLIERS_DEFAULT_3D_MEDIAN_VALUE = [[5.0, 4.0, 15.0], [8.0, 25.0, 12.0], [35.0, 16.0, 45.0]]
 
+WEIGHT_COMPRESSION_REDUCERS_DATA = [[[1, 2, 0], [1, -3, 10]], [[-1, 2, -3], [4, 5, -6]]]
 
 default_test_quantile = 0.1
 
@@ -77,28 +86,48 @@ OFFLINE_AGGREGATORS_TEST_CASES = [
         min_ref=np.array(
             [
                 [[[-50000, 5, 10]]],
+                [[[-50000, 5, 10]]],
+                [[[-40000, 4, 8]]],
                 [[[-40000, 4, 8]]],
                 [[[-30000, 3, 6]]],
+                [[[-30000, 3, 6]]],
+                [[[-20000, 2, 4]]],
                 [[[-20000, 2, 4]]],
                 [[[-10000, 1, 2]]],
+                [[[-10000, 1, 2]]],
+                [[[0, 0, 0]]],
                 [[[0, 0, 0]]],
                 [[[-6, -7, -8]]],
+                [[[-6, -7, -8]]],
+                [[[-12, -14, -16]]],
                 [[[-12, -14, -16]]],
                 [[[-18, -21, -24]]],
+                [[[-18, -21, -24]]],
+                [[[-24, -28, -32]]],
                 [[[-24, -28, -32]]],
             ]
         ),
         max_ref=np.array(
             [
                 [[[50000, -5, -10]]],
+                [[[50000, -5, -10]]],
+                [[[40000, -4, -8]]],
                 [[[40000, -4, -8]]],
                 [[[30000, -3, -6]]],
+                [[[30000, -3, -6]]],
+                [[[20000, -2, -4]]],
                 [[[20000, -2, -4]]],
                 [[[10000, -1, -2]]],
+                [[[10000, -1, -2]]],
+                [[[0, 0, 0]]],
                 [[[0, 0, 0]]],
                 [[[6, 7, 8]]],
+                [[[6, 7, 8]]],
+                [[[12, 14, 16]]],
                 [[[12, 14, 16]]],
                 [[[18, 21, 24]]],
+                [[[18, 21, 24]]],
+                [[[24, 28, 32]]],
                 [[[24, 28, 32]]],
             ]
         ),
@@ -106,23 +135,21 @@ OFFLINE_AGGREGATORS_TEST_CASES = [
 ]
 
 
-def default_test_mean_no_outlier(tensor_processor, aggregation_axes):
+def default_test_mean_no_outlier(aggregation_axes):
     return MeanNoOutliersAggregator(
-        tensor_processor=tensor_processor,
         aggregation_axes=aggregation_axes,
         quantile=default_test_quantile,
     )
 
 
-def default_test_median_no_outlier(tensor_processor, aggregation_axes):
+def default_test_median_no_outlier(aggregation_axes):
     return MedianNoOutliersAggregator(
-        tensor_processor=tensor_processor,
         aggregation_axes=aggregation_axes,
         quantile=default_test_quantile,
     )
 
 
-class TemplateTestReducersAggreagtors:
+class TemplateTestReducersAggregators:
     @abstractmethod
     def get_nncf_tensor(self, x: np.array, dtype: Optional[Dtype] = None):
         pass
@@ -149,16 +176,33 @@ class TemplateTestReducersAggreagtors:
     def cast_tensor(self, tensor, dtype: Dtype):
         pass
 
-    @abstractmethod
-    def expand_dims(self, tensor, dims: Tuple[int, ...]):
-        pass
+    @pytest.mark.parametrize("reducer_cls", [RawReducer])
+    @pytest.mark.parametrize("input_data", [np.arange(24).reshape((1, 2, 3, 4)), np.array([])])
+    def test_other_reducers(self, reducer_cls, input_data):
+        reducer = reducer_cls()
+        tensor_data = self.get_nncf_tensor(input_data)
+        reduced_input = reducer([tensor_data])
+        if tensor_data.isempty():
+            assert reduced_input is None
+        else:
+            assert len(reduced_input) == 1
+            assert fns.allclose(reduced_input[0], tensor_data)
 
-    def test_noop_reducer(self, reducers):
-        reducer = reducers["noop"]()
-        input_ = np.arange(24).reshape((1, 2, 3, 4))
-        reduced_input = reducer([self.get_nncf_tensor(input_)])
+    @pytest.mark.parametrize("reducer_cls", [RawReducer, ShapeReducer])
+    def test_other_reducers_name_hash_equal(self, reducer_cls):
+        reducers_instances = [reducer_cls() for _ in range(2)]
+        assert hash(reducers_instances[0]) == hash(reducers_instances[1])
+        assert reducers_instances[0] == reducers_instances[1]
+        assert reducers_instances[0].name == reducers_instances[1].name
+        assert len(set(reducers_instances)) == 1
+
+    @pytest.mark.parametrize("input_data", [np.arange(24).reshape((1, 2, 3, 4)), np.array([1])])
+    def test_shape_reducer(self, input_data):
+        reducer = ShapeReducer()
+        tensor_data = self.get_nncf_tensor(input_data)
+        reduced_input = reducer([tensor_data])
         assert len(reduced_input) == 1
-        assert self.all_close(reduced_input[0].tensor, input_)
+        assert all(it[0] == it[1] for it in zip(reduced_input[0], tensor_data.shape))
 
     @pytest.mark.parametrize(
         "reducer_name,ref",
@@ -176,7 +220,7 @@ class TemplateTestReducersAggreagtors:
             reducer = reducers[reducer_name](reduction_axes=reduction_axes_, inplace=False)
             val = reducer([self.get_nncf_tensor(input_, Dtype.FLOAT)])
             assert len(val) == 1
-            assert self.all_close(val[0].tensor, self.cast_tensor(ref[i], Dtype.FLOAT))
+            assert fns.allclose(val[0], self.get_nncf_tensor(ref[i]))
 
     @pytest.mark.parametrize(
         "reducer_name,ref", [("quantile", ([[[[-20000]]]], [[[[10000]]]])), ("abs_quantile", ([[[[20000]]]],))]
@@ -188,20 +232,56 @@ class TemplateTestReducersAggreagtors:
         input_[0][0][1] = 10000
         reducer = reducers[reducer_name](reduction_axes=reduction_axes, inplace=False)
         val = reducer([self.get_nncf_tensor(input_, dtype=Dtype.FLOAT)])
-        assert len(val) == len(ref)
+        assert val.shape[0] == len(ref)
         for i, ref_ in enumerate(ref):
-            assert self.all_close(val[i].tensor, self.cast_tensor(ref_, Dtype.FLOAT))
+            assert fns.allclose(val[i], self.get_nncf_tensor(ref_))
 
     @pytest.mark.parametrize(
-        "reducer_name,ref",
-        [("batch_mean", [[[[-12.5, -11.5, -10.5], [-9.5, -8.5, -7.5], [-6.5, -5.5, -4.5]]]]), ("mean_per_ch", [-8.5])],
+        "axes, reference",
+        [[None, 16.1666], [(0,), 14.25], [(0, 1), 15.875], [(0, 1, 2), 16.1666]],
     )
-    def test_batch_mean_mean_per_ch_reducers(self, reducer_name, ref, reducers):
+    def test_mean_variance_reducer(self, axes, reference):
+        reducer = MeanVarianceReducer(reduction_axes=axes)
+        nncf_data = self.get_nncf_tensor(np.array(WEIGHT_COMPRESSION_REDUCERS_DATA), dtype=Dtype.FLOAT)
+        result = reducer._reduce_out_of_place([nncf_data])
+        assert len(result) == 1
+        assert fns.allclose(result[0], self.get_nncf_tensor(reference))
+
+    @pytest.mark.parametrize(
+        "axes, reference",
+        [[None, 10.0], [(0,), 4.16666], [(0, 1), 6.33333], [(0, 1, 2), 10.0]],
+    )
+    def test_mean_abs_max_reducer(self, axes, reference):
+        reducer = MeanAbsMaxReducer(reduction_axes=axes)
+        nncf_data = self.get_nncf_tensor(np.array(WEIGHT_COMPRESSION_REDUCERS_DATA), dtype=Dtype.FLOAT)
+        result = reducer._reduce_out_of_place([nncf_data])
+        assert len(result) == 1
+        assert fns.allclose(result[0], self.get_nncf_tensor(reference))
+
+    @pytest.mark.parametrize(
+        "axes, reference",
+        [[None, 16.1666], [(0,), 64.0], [(0, 1), 36.1875], [(0, 1, 2), 16.1666]],
+    )
+    def test_max_variance_reducer(self, axes, reference):
+        reducer = MaxVarianceReducer(reduction_axes=axes)
+        nncf_data = self.get_nncf_tensor(np.array(WEIGHT_COMPRESSION_REDUCERS_DATA), dtype=Dtype.FLOAT)
+        result = reducer._reduce_out_of_place([nncf_data])
+        assert len(result) == 1
+        assert fns.allclose(result[0], self.get_nncf_tensor(reference))
+
+    @pytest.mark.parametrize(
+        "reducer_name,ref,kwargs",
+        [
+            ("batch_mean", [[[[-12.5, -11.5, -10.5], [-9.5, -8.5, -7.5], [-6.5, -5.5, -4.5]]]], {}),
+            ("mean_per_ch", [-22.0, -13.0, -4.0, 5.0], {"channel_axis": 0}),
+        ],
+    )
+    def test_batch_mean_mean_per_ch_reducers(self, reducer_name, ref, reducers, kwargs):
         input_ = np.arange(-26, 10).reshape((4, 1, 3, 3))
-        reducer = reducers[reducer_name](inplace=False)
+        reducer = reducers[reducer_name](inplace=False, **kwargs)
         val = reducer([self.get_nncf_tensor(input_, Dtype.FLOAT)])
         assert len(val) == 1
-        assert self.all_close(val[0].tensor, self.cast_tensor(ref, Dtype.FLOAT))
+        assert fns.allclose(val[0], self.get_nncf_tensor(ref))
 
     def test_noop_aggregator(self):
         aggregator = NoopAggregator(None)
@@ -215,7 +295,7 @@ class TemplateTestReducersAggreagtors:
         aggregated = aggregator.aggregate()
         assert len(aggregated) == 3
         for val in aggregated:
-            assert self.all_close(val, input_)
+            assert fns.allclose(val, self.get_nncf_tensor(input_))
 
     def test_shape_aggregator(self):
         aggregator = ShapeAggregator()
@@ -231,65 +311,77 @@ class TemplateTestReducersAggreagtors:
         "offline_aggregators_test_desc",
         OFFLINE_AGGREGATORS_TEST_CASES,
     )
-    def test_min_max_aggregators(
-        self, offline_aggregators_test_desc: OfflineAggregatorTestCase, tensor_processor: NNCFCollectorTensorProcessor
-    ):
+    def test_min_max_aggregators(self, offline_aggregators_test_desc: OfflineAggregatorTestCase):
         aggregation_axes = offline_aggregators_test_desc.aggregation_axes
-        min_aggregator = MinAggregator(tensor_processor=tensor_processor, aggregation_axes=aggregation_axes)
-        max_aggregator = MaxAggregator(tensor_processor=tensor_processor, aggregation_axes=aggregation_axes)
+        min_aggregator = MinAggregator(aggregation_axes=aggregation_axes)
+        max_aggregator = MaxAggregator(aggregation_axes=aggregation_axes)
         input_ = np.arange(3 * 3).reshape((1, 3, 3))
         input_[0, 0, 0] = -10000
         for i in range(-5, 5):
             min_aggregator.register_reduced_input(self.get_nncf_tensor(input_ * (-i)))
             max_aggregator.register_reduced_input(self.get_nncf_tensor(input_ * i))
 
+            for axis in aggregation_axes:
+                if axis:
+                    concatted_input = fns.concatenate([self.get_nncf_tensor(input_)] * 2, axis - 1).data
+                    min_aggregator.register_reduced_input(self.get_nncf_tensor(concatted_input * (-i)))
+                    max_aggregator.register_reduced_input(self.get_nncf_tensor(concatted_input * i))
+
         min_ref = offline_aggregators_test_desc.min_ref
         max_ref = offline_aggregators_test_desc.max_ref
-        assert self.all_close(
-            min_aggregator.aggregate(),
-            min_ref,
-        )
-        assert self.all_close(max_aggregator.aggregate(), max_ref)
+
+        assert fns.allclose(min_aggregator.aggregate(), self.get_nncf_tensor(min_ref))
+        assert fns.allclose(max_aggregator.aggregate(), self.get_nncf_tensor(max_ref))
 
     NO_OUTLIERS_TEST_PARAMS = [
-        (MeanAggregator, True, 1, [1404.5138888888905]),
-        (MedianAggregator, True, 1, [24.0]),
+        (MeanAggregator, (0, 1), 1, [1404.5138888888905]),
+        (MedianAggregator, (0, 1), 1, [24.0]),
         (
             MeanAggregator,
-            False,
+            (0,),
             1,
             [2503.125, -2493.75, 5009.375, -4987.5, 7515.625, -7481.25, 10021.875, -9975.0, 12528.125],
         ),
-        (MedianAggregator, False, 1, [4.5, 5.0, 13.5, 10.0, 22.5, 15.0, 31.5, 20.0, 40.5]),
-        (MeanAggregator, True, 2, [[2512.5, -1651.04166667, 3352.08333333]]),
-        (MedianAggregator, True, 2, [[13.0, 12.5, 21.0]]),
-        (MeanAggregator, False, 2, DEFALUT_3D_MEAN_VALUE),
-        (MedianAggregator, False, 2, DEFALUT_3D_MEDIAN_VALUE),
-        (MeanAggregator, True, 3, [DEFALUT_3D_MEAN_VALUE]),
-        (MedianAggregator, True, 3, [DEFALUT_3D_MEDIAN_VALUE]),
-        (MeanAggregator, False, 3, [DEFALUT_3D_MEAN_VALUE]),
-        (MedianAggregator, False, 3, [DEFALUT_3D_MEDIAN_VALUE]),
-        (default_test_mean_no_outlier, True, 1, [20.0893]),
-        (default_test_median_no_outlier, True, 1, [30.0]),
+        (MedianAggregator, (0,), 1, [4.5, 5.0, 13.5, 10.0, 22.5, 15.0, 31.5, 20.0, 40.5]),
+        ############################################################
+        (MeanAggregator, (0, 1), 2, [[2512.5, -1651.04166667, 3352.08333333]]),
+        (MedianAggregator, (0, 1), 2, [[13.0, 12.5, 21.0]]),
+        (MeanAggregator, (0,), 2, DEFAULT_3D_MEAN_VALUE),
+        (MedianAggregator, (0,), 2, DEFAULT_3D_MEDIAN_VALUE),
+        ############################################################
+        (MeanAggregator, (0, 1), 3, [DEFAULT_3D_MEAN_VALUE]),
+        (MedianAggregator, (0, 1), 3, [DEFAULT_3D_MEDIAN_VALUE]),
+        (MeanAggregator, (0,), 3, [DEFAULT_3D_MEAN_VALUE]),
+        (MedianAggregator, (0,), 3, [DEFAULT_3D_MEDIAN_VALUE]),
+        ############################################################
+        (default_test_mean_no_outlier, (0, 1), 1, [20.0893]),
+        (default_test_median_no_outlier, (0, 1), 1, [30.0]),
         (
             default_test_mean_no_outlier,
-            False,
+            (0,),
             1,
             [4.16666667, 8.33333333, 12.5, 16.66666667, 20.83333333, 25.0, 29.16666667, 33.33333333, 37.5],
         ),
-        (default_test_median_no_outlier, False, 1, [5.0, 4.0, 15.0, 8.0, 25.0, 12.0, 35.0, 16.0, 45.0]),
-        (default_test_mean_no_outlier, True, 2, [[16.66666667, 20.83333333, 25.0]]),
-        (default_test_median_no_outlier, True, 2, [[14.0, 10.0, 24.0]]),
-        (default_test_mean_no_outlier, False, 2, NO_OUTLIERS_DEFAULT_3D_MEAN_VALUE),
-        (default_test_median_no_outlier, False, 2, NO_OUTLIERS_DEFAULT_3D_MEDIAN_VALUE),
-        (default_test_mean_no_outlier, True, 3, [NO_OUTLIERS_DEFAULT_3D_MEAN_VALUE]),
-        (default_test_median_no_outlier, True, 3, [NO_OUTLIERS_DEFAULT_3D_MEDIAN_VALUE]),
-        (default_test_mean_no_outlier, False, 3, [NO_OUTLIERS_DEFAULT_3D_MEAN_VALUE]),
-        (default_test_median_no_outlier, False, 3, [NO_OUTLIERS_DEFAULT_3D_MEDIAN_VALUE]),
+        (default_test_median_no_outlier, (0,), 1, [5.0, 4.0, 15.0, 8.0, 25.0, 12.0, 35.0, 16.0, 45.0]),
+        ############################################################
+        (default_test_mean_no_outlier, (0, 1), 2, [[16.66666667, 20.83333333, 25.0]]),
+        (default_test_median_no_outlier, (0, 1), 2, [[14.0, 10.0, 24.0]]),
+        (default_test_mean_no_outlier, (0,), 2, NO_OUTLIERS_DEFAULT_3D_MEAN_VALUE),
+        (default_test_median_no_outlier, (0,), 2, NO_OUTLIERS_DEFAULT_3D_MEDIAN_VALUE),
+        ############################################################
+        (default_test_mean_no_outlier, (0, 1), 3, [NO_OUTLIERS_DEFAULT_3D_MEAN_VALUE]),
+        (default_test_median_no_outlier, (0, 1), 3, [NO_OUTLIERS_DEFAULT_3D_MEDIAN_VALUE]),
+        (default_test_mean_no_outlier, (0,), 3, [NO_OUTLIERS_DEFAULT_3D_MEAN_VALUE]),
+        (default_test_median_no_outlier, (0,), 3, [NO_OUTLIERS_DEFAULT_3D_MEDIAN_VALUE]),
     ]
 
-    @pytest.mark.parametrize("aggregator_cls,use_per_sample_stats,dims,refs", NO_OUTLIERS_TEST_PARAMS)
-    def test_mean_median_agggregators(self, aggregator_cls, refs, tensor_processor, dims, use_per_sample_stats):
+    def _get_inputs_for_mean_median_aggregators(
+        self,
+        dims: int,
+        aggregation_axes: Tuple[int, ...],
+        is_median: bool,
+        different_sizes: bool = False,
+    ) -> Iterator[NNCFTensor]:
         input_ = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9])
         input_with_outliers = np.array(
             [100_000, -100_000, 200_000, -200_000, 300_000, -300_000, 400_000, -400_000, 500_000]
@@ -301,29 +393,71 @@ class TemplateTestReducersAggreagtors:
             input_ = input_.reshape((1, 3, 3))
             input_with_outliers = input_with_outliers.reshape((1, 3, 3))
 
-        aggregation_axes = (0, 1) if use_per_sample_stats else (0,)
-        aggregator = aggregator_cls(tensor_processor=tensor_processor, aggregation_axes=aggregation_axes)
         for i in range(1, 6):
-            aggregator.register_reduced_input(self.get_nncf_tensor(input_ * i, Dtype.FLOAT))
+            yield self.get_nncf_tensor(input_ * i, Dtype.FLOAT)
         # this registration is to make diff between mean and median bigger
-        aggregator.register_reduced_input(self.get_nncf_tensor(input_ * 10, Dtype.FLOAT))
-        is_median = isinstance(aggregator, (MedianAggregator, MedianNoOutliersAggregator))
+        yield self.get_nncf_tensor(input_ * 10, Dtype.FLOAT)
         # Outliers registration
         for i in range(2):
             # mult is needed to make outlier and no outlier aggreagators differs
             mult = 2.2 * i - 1 if not is_median else 1
-            aggregator.register_reduced_input(self.get_nncf_tensor(input_with_outliers * mult, Dtype.FLOAT))
-            if is_median and dims == 1 and use_per_sample_stats:
+            yield self.get_nncf_tensor(input_with_outliers * mult, Dtype.FLOAT)
+            if is_median and dims == 1 and aggregation_axes == (0, 1):
                 # To make no outliers and outliers versions return different output
-                aggregator.register_reduced_input(
-                    self.get_nncf_tensor(np.full(input_with_outliers.shape, input_with_outliers[-1]), Dtype.FLOAT)
-                )
-        ret_val = aggregator.aggregate()
+                yield self.get_nncf_tensor(np.full(input_with_outliers.shape, input_with_outliers[-1]), Dtype.FLOAT)
 
-        assert self.all_close(ret_val, self.cast_tensor(refs, Dtype.FLOAT))
+        if different_sizes:
+            # Different size input registration:
+            cat_input = self.get_nncf_tensor(input_, Dtype.FLOAT)
+            for axis in aggregation_axes:
+                if axis:
+                    yield fns.concatenate([cat_input] * 2, axis=axis - 1)
+
+    @pytest.mark.parametrize("aggregator_cls,aggregation_axes,dims,refs", NO_OUTLIERS_TEST_PARAMS)
+    def test_mean_median_aggregators(self, aggregator_cls, refs, dims, aggregation_axes):
+        aggregator = aggregator_cls(aggregation_axes=aggregation_axes)
+        is_median = isinstance(aggregator, (MedianAggregator, MedianNoOutliersAggregator))
+        for input_ in self._get_inputs_for_mean_median_aggregators(dims, aggregation_axes, is_median):
+            aggregator.register_reduced_input(input_)
+
+        ret_val = aggregator.aggregate()
+        assert fns.allclose(ret_val, self.get_nncf_tensor(refs))
+
+    NO_OUTLIERS_DIFFERENT_SIZES_TEST_PARAMS = [
+        (MeanAggregator, (1,), 1, [[5.0], [10.0], [15.0], [20.0], [25.0], [50.0], [-55556.0], [66667.0], [5.0]]),
+        (MedianAggregator, (1,), 1, [[5.0], [10.0], [15.0], [20.0], [25.0], [50.0], [100_000.0], [100_000.0], [5.0]]),
+        (MeanAggregator, (0, 1), 1, [1124.6111]),
+        (MedianAggregator, (0, 1), 1, [15.5]),
+        (
+            default_test_mean_no_outlier,
+            (1,),
+            1,
+            [[5.0], [10.0], [15.0], [20.0], [25.0], [50.0], [-57143.0], [68571.0], [5.0]],
+        ),
+        (
+            default_test_median_no_outlier,
+            (1,),
+            1,
+            [[5.0], [10.0], [15.0], [20.0], [25.0], [50.0], [100_000.0], [100_000.0], [5.0]],
+        ),
+        (default_test_mean_no_outlier, (0, 1), 1, [16.8750]),
+        (default_test_median_no_outlier, (0, 1), 1, [20]),
+    ]
+
+    @pytest.mark.parametrize("aggregator_cls,aggregation_axes,dims,refs", NO_OUTLIERS_DIFFERENT_SIZES_TEST_PARAMS)
+    def test_mean_median_agggregators_different_sizes(self, aggregator_cls, refs, dims, aggregation_axes):
+        aggregator = aggregator_cls(aggregation_axes=aggregation_axes)
+        is_median = isinstance(aggregator, (MedianAggregator, MedianNoOutliersAggregator))
+        for input_ in self._get_inputs_for_mean_median_aggregators(
+            dims, aggregation_axes, is_median, different_sizes=True
+        ):
+            aggregator.register_reduced_input(input_)
+
+        ret_val = aggregator.aggregate()
+        assert fns.allclose(ret_val, self.get_nncf_tensor(refs))
 
     @pytest.fixture(
-        name="MAD_precentile_aggregator_cls",
+        name="MAD_percentile_aggregator_cls",
         params=[
             MedianAbsoluteDeviationAggregator,
             partial(
@@ -373,8 +507,8 @@ class TemplateTestReducersAggreagtors:
     }
 
     @pytest.mark.parametrize("aggregation_axes", [None, (0,), (0, 1)])
-    def test_mad_percentile_aggregators(self, MAD_precentile_aggregator_cls, tensor_processor, aggregation_axes):
-        aggregator = MAD_precentile_aggregator_cls(tensor_processor=tensor_processor, aggregation_axes=aggregation_axes)
+    def test_mad_percentile_aggregators(self, MAD_percentile_aggregator_cls, aggregation_axes):
+        aggregator = MAD_percentile_aggregator_cls(aggregation_axes=aggregation_axes)
         input_ = np.array([1, 2, 3, 4, 5, 6, 7, 8, 9])
         for i in range(9):
             aggregator.register_reduced_input(self.get_nncf_tensor(input_ * i, Dtype.FLOAT))
@@ -383,7 +517,7 @@ class TemplateTestReducersAggreagtors:
         ref_values = self.REF_MAD_PERCENTILE_REF_VALUES[aggregator.__class__][aggregation_axes]
         assert len(ret_val) == len(ref_values)
         for k, v in ref_values.items():
-            assert self.all_close(ret_val[k], self.cast_tensor(v, Dtype.FLOAT))
+            assert fns.allclose(ret_val[k], self.get_nncf_tensor(v)), f"{k}"
 
     REF_MAD_PERCENTILE_REF_VALUES_DYNAMIC_TENSORS = {
         MedianAbsoluteDeviationAggregator: {
@@ -398,8 +532,8 @@ class TemplateTestReducersAggreagtors:
         },
     }
 
-    def test_mad_percentile_aggregators_different_sizes(self, MAD_precentile_aggregator_cls, tensor_processor):
-        aggregator = MAD_precentile_aggregator_cls(tensor_processor=tensor_processor, aggregation_axes=(0, 1, 3))
+    def test_mad_percentile_aggregators_different_sizes(self, MAD_percentile_aggregator_cls):
+        aggregator = MAD_percentile_aggregator_cls(aggregation_axes=(0, 1, 3))
         for shape in ((2, 3, 4), (4, 3, 8)):
             aggregator.register_reduced_input(
                 self.get_nncf_tensor(np.arange(np.prod(shape)).reshape(shape), Dtype.FLOAT)
@@ -409,27 +543,17 @@ class TemplateTestReducersAggreagtors:
         ref_values = self.REF_MAD_PERCENTILE_REF_VALUES_DYNAMIC_TENSORS[aggregator.__class__]
         assert len(ret_val) == len(ref_values)
         for k, v in ref_values.items():
-            assert self.all_close(ret_val[k], self.cast_tensor(v, Dtype.FLOAT))
+            assert fns.allclose(ret_val[k], self.get_nncf_tensor(v))
 
-    def test_mad_percentile_aggregators_not_implemented_aggregation_axes(
-        self, MAD_precentile_aggregator_cls, tensor_processor
-    ):
+    def test_mad_percentile_aggregators_not_implemented_aggregation_axes(self, MAD_percentile_aggregator_cls):
         with pytest.raises(NotImplementedError):
-            MAD_precentile_aggregator_cls(tensor_processor=tensor_processor, aggregation_axes=(1, 2, 3))
+            MAD_percentile_aggregator_cls(aggregation_axes=(1, 2, 3))
 
     @pytest.mark.parametrize(
         "reducer_name",
-        ["noop", "min", "max", "abs_max", "mean", "quantile", "abs_quantile", "batch_mean", "mean_per_ch"],
+        ["min", "max", "abs_max", "mean", "quantile", "abs_quantile", "batch_mean", "mean_per_ch"],
     )
     def test_reducers_name_hash_equal(self, reducer_name, reducers):
-        if reducer_name == "noop":
-            reducers_instances = [reducers[reducer_name]() for _ in range(2)]
-            assert hash(reducers_instances[0]) == hash(reducers_instances[1])
-            assert reducers_instances[0] == reducers_instances[1]
-            assert reducers_instances[0].name == reducers_instances[1].name
-            assert len(set(reducers_instances)) == 1
-            return
-
         params = {}
         if reducer_name in ["min", "max", "abs_max", "mean"]:
             params["reduction_axes"] = [None, (0, 1, 3), (1, 2, 3)]
@@ -443,10 +567,10 @@ class TemplateTestReducersAggreagtors:
             params["inplace"] = [False, True]
             params["channel_axis"] = [1, 2]
         else:
-            raise RuntimeError(
-                "test_min_max_mean_reducer_hash_equal configurated in a wrong way."
-                f" Wrong reducer_name: {reducer_name}"
+            msg = (
+                f"test_min_max_mean_reducer_hash_equal configurated in a wrong way. Wrong reducer_name: {reducer_name}"
             )
+            raise nncf.ValidationError(msg)
 
         def product_dict(**kwargs):
             keys = kwargs.keys()
@@ -467,3 +591,18 @@ class TemplateTestReducersAggreagtors:
         for reducer, init_hash in zip(reducers_instances, hashes):
             reducer(test_input)
             assert hash(reducer) == init_hash
+
+    HAWQ_AGGREGATOR_REFERENCE_VALUES = [
+        ([np.arange(10)], 57.0),
+        ([np.arange(12).reshape((2, 6)), np.arange(24).reshape((4, 6))], 181.92361111111111),
+        ([np.arange(8 * i).reshape((1, 8, i)) for i in range(1, 5)], 165.61627197265625),
+    ]
+
+    @pytest.mark.parametrize("inputs,reference_output", HAWQ_AGGREGATOR_REFERENCE_VALUES)
+    def test_hawq_aggregator(self, inputs, reference_output):
+        aggregator = HAWQAggregator()
+        for x in inputs:
+            aggregator.register_reduced_input(self.get_nncf_tensor(x, Dtype.FLOAT))
+
+        ret_val = aggregator.aggregate()
+        assert fns.allclose(ret_val, reference_output)

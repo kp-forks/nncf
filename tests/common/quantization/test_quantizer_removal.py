@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -18,7 +18,7 @@ import pytest
 from nncf.common.graph import NNCFGraph
 from nncf.common.graph.layer_attributes import Dtype
 from nncf.common.quantization.quantizer_removal import find_quantizer_nodes_to_cut
-from nncf.quantization.passes import remove_shapeof_subgraphs
+from nncf.quantization.passes import find_shapeof_subgraphs
 from tests.common.quantization.metatypes import CONSTANT_METATYPES
 from tests.common.quantization.metatypes import METATYPES_FOR_TEST
 from tests.common.quantization.metatypes import QUANTIZABLE_METATYPES
@@ -54,26 +54,26 @@ GRAPHS = {
             Node(116, "relu"),
             Node(117, "add"),
             Node(118, "max_pool2d"),
-            Node(119, "quantizer"),
+            Node(119, "fake_quantize"),
             Node(124, "relu"),
             Node(125, "add"),
             Node(126, "constant"),
             Node(127, "conv2d"),
-            Node(128, "quantizer"),
+            Node(128, "fake_quantize"),
             Node(133, "constant"),
-            Node(134, "quantizer"),
-            Node(139, "quantizer"),
+            Node(134, "fake_quantize"),
+            Node(139, "fake_quantize"),
             Node(144, "add"),
             Node(145, "constant"),
             Node(146, "conv2d"),
-            Node(147, "quantizer"),
+            Node(147, "fake_quantize"),
             Node(152, "constant"),
-            Node(153, "quantizer"),
+            Node(153, "fake_quantize"),
             Node(158, "relu"),
             Node(159, "add"),
             Node(160, "constant"),
             Node(161, "conv2d"),
-            Node(162, "quantizer"),
+            Node(162, "fake_quantize"),
             Node(167, "constant"),
         ],
         [
@@ -107,15 +107,15 @@ GRAPHS = {
     "graph_with_shapeof": Graph(
         [
             Node(0, "parameter"),
-            Node(82, "quantizer"),
+            Node(82, "fake_quantize"),
             Node(720, "constant"),
             Node(87, "power"),
-            Node(93, "quantizer"),
+            Node(93, "fake_quantize"),
             Node(99, "multiply"),
-            Node(710, "quantizer"),
+            Node(710, "fake_quantize"),
             Node(715, "constant"),
             Node(106, "shapeof"),
-            Node(105, "quantizer"),
+            Node(105, "fake_quantize"),
             Node(115, "interpolate"),
             Node(117, "strided_slice"),
             Node(746, "constant"),
@@ -156,11 +156,45 @@ GRAPHS = {
             Edge(0, 0, 82, 0),
         ],
     ),
+    "simple_graph_quantize_dequantize": Graph(
+        [
+            Node(0, "parameter"),
+            Node(37, "quantize"),
+            Node(38, "dequantize"),
+            Node(41, "conv2d"),
+            Node(42, "quantize"),
+            Node(40, "dequantize"),
+            Node(43, "dequantize"),
+            Node(39, "quantize"),
+            Node(46, "conv2d"),
+            Node(65, "add"),
+            Node(45, "dequantize"),
+            Node(64, "dequantize"),
+            Node(44, "quantize"),
+            Node(63, "quantize"),
+        ],
+        [
+            Edge(0, 0, 37, 0),
+            Edge(37, 0, 38, 0),
+            Edge(38, 0, 41, 0),
+            Edge(41, 0, 42, 0),
+            Edge(42, 0, 43, 0),
+            Edge(40, 0, 41, 1),
+            Edge(43, 0, 46, 0),
+            Edge(43, 0, 65, 0),
+            Edge(39, 0, 40, 0),
+            Edge(45, 0, 46, 1),
+            Edge(64, 0, 65, 1),
+            Edge(44, 0, 45, 0),
+            Edge(63, 0, 64, 0),
+            Edge(46, 0, 63, 0),
+        ],
+    ),
 }
 
 
 @dataclass
-class TestCase:
+class ParameterTestCase:
     """
     :param node_name: Quantizer node's name. We want to remove this
         quantizer from the model.
@@ -178,15 +212,51 @@ class TestCase:
 
 TEST_CASES = {
     "simple_graph": [
-        TestCase("quantizer_119", ["quantizer_139", "quantizer_162", "quantizer_119"], ["add_117", "conv2d_161"]),
-        TestCase("quantizer_128", ["quantizer_134", "quantizer_128"], ["conv2d_127"]),
-        TestCase("quantizer_134", ["quantizer_134", "quantizer_128"], ["conv2d_127"]),
-        TestCase("quantizer_139", ["quantizer_139", "quantizer_162", "quantizer_119"], ["add_117", "conv2d_161"]),
-        TestCase("quantizer_147", ["quantizer_153", "quantizer_147"], ["conv2d_146"]),
-        TestCase("quantizer_153", ["quantizer_153", "quantizer_147"], ["conv2d_146"]),
-        TestCase("quantizer_162", ["quantizer_139", "quantizer_162", "quantizer_119"], ["add_117", "conv2d_161"]),
+        ParameterTestCase(
+            "fake_quantize_119",
+            ["fake_quantize_139", "fake_quantize_162", "fake_quantize_119"],
+            ["add_117", "conv2d_161"],
+        ),
+        ParameterTestCase("fake_quantize_128", ["fake_quantize_134", "fake_quantize_128"], ["conv2d_127"]),
+        ParameterTestCase("fake_quantize_134", ["fake_quantize_134", "fake_quantize_128"], ["conv2d_127"]),
+        ParameterTestCase(
+            "fake_quantize_139",
+            ["fake_quantize_139", "fake_quantize_162", "fake_quantize_119"],
+            ["add_117", "conv2d_161"],
+        ),
+        ParameterTestCase("fake_quantize_147", ["fake_quantize_153", "fake_quantize_147"], ["conv2d_146"]),
+        ParameterTestCase("fake_quantize_153", ["fake_quantize_153", "fake_quantize_147"], ["conv2d_146"]),
+        ParameterTestCase(
+            "fake_quantize_162",
+            ["fake_quantize_139", "fake_quantize_162", "fake_quantize_119"],
+            ["add_117", "conv2d_161"],
+        ),
     ],
-    "graph_with_shapeof": [TestCase("quantizer_105", ["quantizer_105"], ["interpolate_115"])],
+    "graph_with_shapeof": [ParameterTestCase("fake_quantize_105", ["fake_quantize_105"], ["interpolate_115"])],
+    "simple_graph_quantize_dequantize": [
+        ParameterTestCase(
+            "quantize_37", ["quantize_37", "dequantize_38", "quantize_39", "dequantize_40"], ["conv2d_41"]
+        ),
+        ParameterTestCase(
+            "quantize_39", ["quantize_37", "dequantize_38", "quantize_39", "dequantize_40"], ["conv2d_41"]
+        ),
+        #
+        ParameterTestCase(
+            "quantize_42",
+            ["quantize_42", "dequantize_43", "quantize_44", "dequantize_45", "quantize_63", "dequantize_64"],
+            ["conv2d_46", "add_65"],
+        ),
+        ParameterTestCase(
+            "quantize_44",
+            ["quantize_42", "dequantize_43", "quantize_44", "dequantize_45", "quantize_63", "dequantize_64"],
+            ["conv2d_46", "add_65"],
+        ),
+        ParameterTestCase(
+            "quantize_63",
+            ["quantize_42", "dequantize_43", "quantize_44", "dequantize_45", "quantize_63", "dequantize_64"],
+            ["conv2d_46", "add_65"],
+        ),
+    ],
 }
 
 
@@ -216,17 +286,29 @@ def create_nncf_graph(graph: Graph) -> NNCFGraph:
 
 def create_test_params():
     test_params = []
+    ids = []
     for graph_name, test_cases in TEST_CASES.items():
         nncf_graph = create_nncf_graph(GRAPHS[graph_name])
-        for test_case in test_cases:
+        for i, test_case in enumerate(test_cases):
+            ids.append(f"{graph_name}_{i}")
             test_params.append((nncf_graph, test_case))
-    return test_params
+    return ids, test_params
 
 
-@pytest.mark.parametrize("nncf_graph,test_case", create_test_params())
-def test_find_quantizer_nodes_to_cut(nncf_graph: NNCFGraph, test_case: TestCase):
+IDS, TEST_PARAMS = create_test_params()
+
+
+@pytest.mark.parametrize("nncf_graph,test_case", TEST_PARAMS, ids=IDS)
+def test_find_quantizer_nodes_to_cut(nncf_graph: NNCFGraph, test_case: ParameterTestCase):
     quantizer_node = nncf_graph.get_node_by_name(test_case.node_name)
-    nncf_graph_without_shapeof = remove_shapeof_subgraphs(deepcopy(nncf_graph), SHAPEOF_METATYPES)
+    # As test graphs are fully connected and does not have readvariable metatype,
+    # this should work
+    input_nodes = nncf_graph.get_input_nodes()
+
+    shapeof_subgraphs = find_shapeof_subgraphs(nncf_graph, SHAPEOF_METATYPES, input_nodes)
+    nncf_graph_without_shapeof = deepcopy(nncf_graph)
+    nncf_graph_without_shapeof.remove_nodes_from(shapeof_subgraphs)
+
     nodes, ops = find_quantizer_nodes_to_cut(
         nncf_graph_without_shapeof,
         quantizer_node,

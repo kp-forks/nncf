@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -9,11 +9,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Optional, Tuple
+from typing import Any, Tuple
 
 import numpy as np
 import openvino.runtime as ov
 
+import nncf
 from nncf.common.graph import NNCFGraph
 from nncf.common.graph import NNCFNode
 from nncf.common.graph.layer_attributes import ConvolutionLayerAttributes
@@ -21,7 +22,12 @@ from nncf.common.graph.transformations.commands import TargetType
 from nncf.common.tensor_statistics.collectors import TensorStatisticCollectorBase
 from nncf.experimental.common.tensor_statistics.collectors import MedianAggregator
 from nncf.experimental.common.tensor_statistics.collectors import TensorCollector
-from nncf.openvino.graph.layer_attributes import OVLayerAttributes
+from nncf.experimental.common.tensor_statistics.statistics import MinMaxTensorStatistic
+from nncf.openvino.graph import node_utils
+from nncf.openvino.graph.layout import OVLayoutElem
+from nncf.openvino.graph.layout import get_conv_weights_layout_from_node
+from nncf.openvino.graph.layout import get_linear_weights_layout_from_node
+from nncf.openvino.graph.metatypes.groups import CONV_OPERATIONS
 from nncf.openvino.graph.metatypes.openvino_metatypes import OVAddMetatype
 from nncf.openvino.graph.metatypes.openvino_metatypes import OVConvolutionMetatype
 from nncf.openvino.graph.metatypes.openvino_metatypes import OVDepthwiseConvolutionMetatype
@@ -30,12 +36,9 @@ from nncf.openvino.graph.metatypes.openvino_metatypes import OVMatMulMetatype
 from nncf.openvino.graph.metatypes.openvino_metatypes import OVSubtractMetatype
 from nncf.openvino.graph.node_utils import create_bias_tensor
 from nncf.openvino.graph.node_utils import get_bias_value
-from nncf.openvino.graph.node_utils import get_node_with_bias_value
 from nncf.openvino.graph.node_utils import get_weight_value
 from nncf.openvino.graph.transformations.commands import OVTargetPoint
-from nncf.openvino.statistics.collectors import OVNNCFCollectorTensorProcessor
 from nncf.openvino.statistics.collectors import OVQuantileReducer
-from nncf.openvino.statistics.statistics import OVMinMaxTensorStatistic
 from nncf.quantization.algorithms.channel_alignment.backend import ChannelAlignmentAlgoBackend
 from nncf.quantization.algorithms.channel_alignment.backend import LayoutDescriptor
 
@@ -77,73 +80,48 @@ class OVChannelAlignmentAlgoBackend(ChannelAlignmentAlgoBackend):
     def get_statistic_collector(
         reduction_axes, q: float, num_samples: int, inplace: bool
     ) -> TensorStatisticCollectorBase:
-        tensor_collector = TensorCollector(OVMinMaxTensorStatistic)
+        tensor_collector = TensorCollector(MinMaxTensorStatistic)
         quantile_reducer = OVQuantileReducer(reduction_axes, (q, 1 - q), inplace)
 
-        for port_id, container_key in enumerate([OVMinMaxTensorStatistic.MIN_STAT, OVMinMaxTensorStatistic.MAX_STAT]):
-            aggregator = MedianAggregator(OVNNCFCollectorTensorProcessor, num_samples=num_samples)
+        for port_id, container_key in enumerate([MinMaxTensorStatistic.MIN_STAT, MinMaxTensorStatistic.MAX_STAT]):
+            aggregator = MedianAggregator(num_samples=num_samples, aggregation_axes=(0, 1))
             tensor_collector.register_statistic_branch(container_key, quantile_reducer, aggregator, port_id)
         return tensor_collector
 
     @staticmethod
     def is_node_with_bias(node: NNCFNode, nncf_graph: NNCFGraph) -> bool:
-        next_nodes = nncf_graph.get_next_nodes(node)
-        if not next_nodes:
-            return False
-
-        add_node = next_nodes[0]
-        if add_node.metatype != OVAddMetatype:
-            return False
-
-        bias_constant = get_node_with_bias_value(add_node, nncf_graph)
-        return bias_constant is not None
+        return node_utils.is_node_with_bias(node, nncf_graph)
 
     @staticmethod
-    def get_dims_descriptor(node: NNCFNode):
-        if node.metatype == OVConvolutionMetatype:
-            return LayoutDescriptor(
-                conv_weight_out_channels_dim=0,
-                conv_weight_in_channels_dim=1,
-                bias_channels_dim=node.metatype.output_channel_axis,
+    def get_dims_descriptor(node: NNCFNode) -> LayoutDescriptor:
+        if node.metatype in CONV_OPERATIONS:
+            weights_layout = get_conv_weights_layout_from_node(node=node)
+        elif node.metatype == OVMatMulMetatype:
+            weights_layout = get_linear_weights_layout_from_node(node=node)
+        else:
+            msg = (
+                f"Metatype {node.metatype} of node {node.node_name} dimensions"
+                " description retrieving is not supported"
             )
-        if node.metatype in [OVGroupConvolutionMetatype, OVDepthwiseConvolutionMetatype]:
+            raise nncf.InternalError(msg)
+
+        if OVLayoutElem.GROUPS in weights_layout:
             # Using groups dim as output channels dim for ChannelAlignment algorithm
             # TODO(dlyakhov) support group convolutions with groups number not in [1, out_channels]
             return LayoutDescriptor(
-                conv_weight_out_channels_dim=0,
-                conv_weight_in_channels_dim=2,
-                bias_channels_dim=node.metatype.output_channel_axis,
+                weights_layout.index(OVLayoutElem.GROUPS),
+                weights_layout.index(OVLayoutElem.C_IN),
+                node.metatype.output_channel_axis,
             )
-        if node.metatype == OVMatMulMetatype:
-            if node.layer_attributes is None:
-                raise RuntimeError(f"Attempt to align matmul node {node.node_name} that have no any constant inputs")
-            layer_attributes: OVLayerAttributes = node.layer_attributes
-            key = layer_attributes.get_const_port_ids()
-            assert len(key) == 1
-            key = key[0]
-            const_attr = layer_attributes.constant_attributes[key]
-            a, b = list(range(len(const_attr["shape"])))[-2:]
-            assert key in [a, b]
-            if key == a:
-                out_ch_dim = a
-                in_ch_dim = b
-            else:
-                out_ch_dim = b
-                in_ch_dim = a
-            if const_attr.get("transpose", False):
-                out_ch_dim, in_ch_dim = in_ch_dim, out_ch_dim
-            return LayoutDescriptor(
-                conv_weight_in_channels_dim=in_ch_dim,
-                conv_weight_out_channels_dim=out_ch_dim,
-                bias_channels_dim=node.metatype.output_channel_axis,
-            )
-        raise RuntimeError(f"Could not retrieve dims description for node {node} with metatype {node.metatype}")
+        return LayoutDescriptor(
+            weights_layout.index(OVLayoutElem.C_OUT) if OVLayoutElem.C_OUT in weights_layout else None,
+            weights_layout.index(OVLayoutElem.C_IN),
+            node.metatype.output_channel_axis,
+        )
 
     @staticmethod
-    def get_conv_layer_attributes(node: NNCFNode) -> Optional[ConvolutionLayerAttributes]:
-        if node.layer_attributes is None:
-            return None
-        return node.layer_attributes.layer_attributes[1]
+    def get_conv_layer_attributes(node: NNCFNode) -> ConvolutionLayerAttributes:
+        return node.layer_attributes.layer_attributes
 
     @staticmethod
     def create_bias_tensor(node: NNCFNode, nncf_graph: NNCFGraph, value: Any) -> np.ndarray:

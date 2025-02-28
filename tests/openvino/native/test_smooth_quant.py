@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -9,32 +9,90 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from pathlib import Path
 from typing import Callable, Dict
 
 import numpy as np
-import openvino.runtime as ov
+import openvino as ov
 import pytest
 import torch
-from openvino.tools.mo import convert_model
 
+import nncf
 from nncf.openvino.graph.layer_attributes import OVLayerAttributes
+from nncf.openvino.graph.layout import OVLayoutElem
 from nncf.openvino.graph.metatypes.openvino_metatypes import OVConvolutionMetatype
 from nncf.openvino.graph.metatypes.openvino_metatypes import OVMatMulMetatype
 from nncf.quantization.algorithms.smooth_quant.openvino_backend import OVSmoothQuantAlgoBackend
-from tests.post_training.test_templates.test_smooth_quant import TemplateTestSQAlgorithm
+from tests.cross_fw.test_templates.helpers import ConvTestModel
+from tests.cross_fw.test_templates.helpers import LinearMultiShapeModel
+from tests.cross_fw.test_templates.helpers import ShareWeghtsConvAndShareLinearModel
+from tests.cross_fw.test_templates.test_smooth_quant import TemplateTestSQAlgorithm
+
+OV_LINEAR_MODEL_MM_OP_MAP = {
+    "MatMul1": "aten::matmul/MatMul",
+    "MatMul2": "aten::matmul/MatMul_1",
+    "MatMul3": "aten::matmul/MatMul_6",
+    "MatMul4": "aten::matmul/MatMul_4",
+    "MatMul5": "aten::matmul/MatMul_7",
+    "MatMul6": "aten::matmul/MatMul_5",
+    "MatMul7": "aten::matmul/MatMul_3",
+    "MatMul8": "aten::matmul/MatMul_2",
+    "Linear1": "__module.linear_2/aten::linear/MatMul",
+    "Linear2": "__module.linear_1/aten::linear/MatMul",
+    "Linear3": "__module.linear_3/aten::linear/MatMul",
+    "Linear4": "__module.linear_4/aten::linear/MatMul",
+}
+
+OV_LINEAR_MODEL_SQ_OP_MAP = {
+    "MatMul1": "aten::reshape/Reshape_0_0/nncf_smooth_quant",
+    "MatMul2": "aten::reshape/Reshape_0_0/nncf_smooth_quant",
+    "MatMul3": "aten::reshape/Reshape_1_0_1/nncf_smooth_quant",
+    "MatMul4": "aten::reshape/Reshape_1_0_0/nncf_smooth_quant",
+    "MatMul5": "aten::reshape/Reshape_2_0_0/nncf_smooth_quant",
+    "MatMul6": "aten::max/ReduceMax_0_0/nncf_smooth_quant",
+    "MatMul7": "aten::flatten/Reshape_1_0_0/nncf_smooth_quant",
+    "MatMul8": "aten::flatten/Reshape_0_0/nncf_smooth_quant",
+    "Linear1": "prim::ListUnpack/VariadicSplit_1_0/nncf_smooth_quant",
+    "Linear2": "prim::ListUnpack/VariadicSplit_0_0/nncf_smooth_quant",
+    "Linear3": "aten::add/Add_0_0/nncf_smooth_quant",
+    "Linear4": "aten::add/Add_0_0/nncf_smooth_quant",
+}
+
+OV_CONV_MODEL_MM_OP_MAP = {
+    "Conv1": "__module.conv/aten::_convolution/Convolution",
+}
+
+OV_CONV_MODEL_SQ_OP_MAP = {
+    "Conv1": "x_0_0/nncf_smooth_quant",
+}
 
 
 class TestOVSQAlgorithm(TemplateTestSQAlgorithm):
     @staticmethod
+    def backend_supports_shared_layers() -> bool:
+        return True
+
+    @staticmethod
     def fn_to_type(tensor) -> np.ndarray:
         return np.array(tensor)
+
+    @pytest.fixture(params=[False, True], ids=["out_of_palce", "inplace"])
+    def inplace_statistics(self, request) -> bool:
+        return request.param
+
+    def get_node_name_map(self, model_cls) -> Dict[str, str]:
+        if model_cls is LinearMultiShapeModel:
+            return OV_LINEAR_MODEL_MM_OP_MAP
+        if model_cls is ConvTestModel:
+            return OV_CONV_MODEL_MM_OP_MAP
+        if model_cls is ShareWeghtsConvAndShareLinearModel:
+            return {}
+        raise NotImplementedError
 
     @staticmethod
     def get_transform_fn() -> Callable:
         def transform_fn(data_item):
             tensor, _ = data_item
-            return {"input.1": tensor}
+            return {"x": tensor}
 
         return transform_fn
 
@@ -44,19 +102,20 @@ class TestOVSQAlgorithm(TemplateTestSQAlgorithm):
 
     @staticmethod
     def backend_specific_model(model: torch.nn.Module, tmp_dir: str) -> ov.Model:
-        # TODO(AlexanderDokuchaev): remove onnx export after fix 119625
-        onnx_path = Path(f"{tmp_dir}/model.onnx")
-        torch.onnx.export(model, torch.rand(model.INPUT_SIZE), onnx_path, opset_version=13, input_names=["input.1"])
-        ov_model = convert_model(onnx_path, input_shape=model.INPUT_SIZE, compress_to_fp16=False)
-        return ov_model
+        return ov.convert_model(model, example_input=torch.rand(model.INPUT_SIZE), input=model.INPUT_SIZE)
 
     @staticmethod
-    def check_scales(model: ov.Model, reference_values: Dict[str, np.ndarray]) -> None:
+    def check_scales(model: ov.Model, reference_values: Dict[str, np.ndarray], model_cls) -> None:
+        names_map = OV_LINEAR_MODEL_SQ_OP_MAP if model_cls is LinearMultiShapeModel else OV_CONV_MODEL_SQ_OP_MAP
         ops_list = {op.get_friendly_name(): op for op in model.get_ops()}
-        for ref_name, ref_value in reference_values.items():
-            node = ops_list[ref_name]
-            const_node = node.input(1).get_source_output().get_node()
-
+        for ref_names, ref_value in reference_values.items():
+            const_nodes = []
+            for ref_name in ref_names:
+                node = ops_list[names_map[ref_name]]
+                const_nodes.append(node.input(1).get_source_output().get_node())
+            # Check unified group acutally shares one constant
+            assert all(node is const_nodes[0] for node in const_nodes[1:])
+            const_node = const_nodes[0]
             assert const_node.get_type_name() == "Constant"
 
             value = const_node.data
@@ -71,7 +130,7 @@ class TestOVSQAlgorithm(TemplateTestSQAlgorithm):
             (OVMatMulMetatype, OVLayerAttributes({}, inputs_attributes={"transpose": True}), 0, -2),
             (OVMatMulMetatype, OVLayerAttributes({}, inputs_attributes={"transpose": False}), 1, -2),
             (OVMatMulMetatype, OVLayerAttributes({}, inputs_attributes={"transpose": True}), 1, -1),
-            (OVMatMulMetatype, OVLayerAttributes({}, inputs_attributes={"transpose": False}), 2, RuntimeError),
+            (OVMatMulMetatype, OVLayerAttributes({}, inputs_attributes={"transpose": False}), 2, nncf.InternalError),
             (OVConvolutionMetatype, OVLayerAttributes({}, inputs_attributes={}), 0, 1),
         ),
     )
@@ -79,18 +138,46 @@ class TestOVSQAlgorithm(TemplateTestSQAlgorithm):
         return super().test_get_activation_channel_axis(node_metatype, layer_attributes, port_id, reference_value)
 
     @pytest.mark.parametrize(
-        "node_metatype, layer_attributes, port_id, reference_value",
+        "node_metatype,weights_layout,reference_value",
         (
-            (OVMatMulMetatype, OVLayerAttributes({1: {"transpose": False}}), 1, -2),
-            (OVMatMulMetatype, OVLayerAttributes({1: {"transpose": True}}), 1, -1),
-            (OVMatMulMetatype, OVLayerAttributes({0: {"transpose": False}}), 0, -1),
-            (OVMatMulMetatype, OVLayerAttributes({0: {"transpose": True}}), 0, -2),
-            (OVMatMulMetatype, OVLayerAttributes({1: {"transpose": False}}), 2, RuntimeError),
-            (OVConvolutionMetatype, OVLayerAttributes({1: {}}), 1, 1),
+            (
+                OVMatMulMetatype,
+                (OVLayoutElem.C_OUT, OVLayoutElem.C_IN),
+                1,
+            ),
+            (
+                OVMatMulMetatype,
+                (OVLayoutElem.C_IN,),
+                0,
+            ),
+            (
+                OVMatMulMetatype,
+                (
+                    OVLayoutElem.SPATIAL,
+                    OVLayoutElem.SPATIAL,
+                    OVLayoutElem.C_IN,
+                    OVLayoutElem.C_OUT,
+                ),
+                2,
+            ),
+            (
+                OVConvolutionMetatype,
+                (
+                    OVLayoutElem.C_IN,
+                    OVLayoutElem.C_OUT,
+                    OVLayoutElem.SPATIAL,
+                    OVLayoutElem.SPATIAL,
+                ),
+                1,
+            ),
         ),
     )
-    def test_get_weight_channel_axis(self, node_metatype, layer_attributes, port_id, reference_value):
-        return super().test_get_weight_channel_axis(node_metatype, layer_attributes, port_id, reference_value)
+    def test_get_weight_channel_axis(self, node_metatype, weights_layout, reference_value, mocker):
+        mocker.patch(
+            "nncf.quantization.algorithms.smooth_quant.openvino_backend.get_linear_weights_layout_from_node",
+            return_value=weights_layout,
+        )
+        return super().test_get_weight_channel_axis(node_metatype, None, reference_value)
 
     @staticmethod
     def get_matmul_metatype():

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -11,7 +11,7 @@
 
 from abc import ABC
 from abc import abstractmethod
-from typing import List, Optional, TypeVar
+from typing import Optional, Set, Tuple, TypeVar, Union
 
 import numpy as np
 
@@ -22,19 +22,13 @@ from nncf.common.graph.transformations.commands import TargetType
 from nncf.common.graph.transformations.commands import TransformationCommand
 from nncf.common.tensor import NNCFTensor
 from nncf.common.tensor_statistics.collectors import TensorStatisticCollectorBase
+from nncf.tensor import Tensor
 
 TModel = TypeVar("TModel")
 OutputType = TypeVar("OutputType")
 
 
 class BiasCorrectionAlgoBackend(ABC):
-    @property
-    @abstractmethod
-    def tensor_processor(self):
-        """
-        Returns backend-specific instance of the NNCFCollectorTensorProcessor.
-        """
-
     @staticmethod
     @abstractmethod
     def target_point(target_type: TargetType, target_node_name: str, port_id: int) -> TargetPoint:
@@ -43,13 +37,13 @@ class BiasCorrectionAlgoBackend(ABC):
 
         :param target_type: Type of the location that should be modified.
         :param target_node_name: Name of the located node.
-        :param port_id: id of the port for the statistics disctribution.
+        :param port_id: id of the port for the statistics distribution.
         :return: Backend-specific TargetPoint.
         """
 
     @staticmethod
     @abstractmethod
-    def create_bias_correction_command(node: NNCFNode, bias_value: np.ndarray) -> TransformationCommand:
+    def create_bias_correction_command(node: NNCFNode, bias_value: Tensor) -> TransformationCommand:
         """
         Creates backend-specific command to update bias value.
 
@@ -60,12 +54,16 @@ class BiasCorrectionAlgoBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def model_extraction_command(inputs: List[str], outputs: List[str]) -> TransformationCommand:
+    def model_extraction_command(
+        input_ids: Set[Tuple[str, int]], output_ids: Set[Tuple[str, int]]
+    ) -> TransformationCommand:
         """
         Returns backend-specific command to extract sub-model based on input & output names.
 
-        :param inputs: List of the input names for sub-model beginning.
-        :param outputs: List of the output names for sub-model end.
+        :param input_ids: Set of the input IDs: pairs of node names and correspondent input port ids.
+            Each pair denotes the sub-graph beginning.
+        :param output_ids: Set of the output IDs: pairs of node names and correspondent output port ids.
+            Each pair denotes the sub-graph ending.
         :return: Backend-specific TransformationCommand for the model extraction.
         """
 
@@ -100,19 +98,18 @@ class BiasCorrectionAlgoBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def raw_statistic_collector(inplace: bool, num_samples: int = None) -> TensorStatisticCollectorBase:
+    def raw_statistic_collector(num_samples: Optional[int] = None) -> TensorStatisticCollectorBase:
         """
         Returns backend-specific raw statistic collector.
-        This statistic collector uses for raw data calculation, without aggregating.
+        This statistic collector is used for raw data calculation, without aggregating.
 
-        :param inplace: Whether to calculate statistic inplace or not.
         :param num_samples: Maximum number of samples to collect.
         :return: Backend-specific TensorStatisticCollectorBase for the statistics calculation.
         """
 
     @staticmethod
     @abstractmethod
-    def process_model_output(raw_data: OutputType, output_name: str) -> NNCFTensor:
+    def process_model_output(raw_data: OutputType, output_name: Union[str, int]) -> NNCFTensor:
         """
         Returns backend-specific processed output from the model.
 
@@ -131,7 +128,7 @@ class BiasCorrectionAlgoBackend(ABC):
 
         :param node: Node of NNCFGraph with bias value.
         :param nncf_graph: NNCFGraph instance with the node.
-        :return: boolean port id.
+        :return: target input port id.
         """
 
     @staticmethod
@@ -148,24 +145,25 @@ class BiasCorrectionAlgoBackend(ABC):
 
     @staticmethod
     @abstractmethod
-    def get_input_name(model: TModel, node_name: str) -> str:
+    def get_input_name(model: TModel, node_name: str, input_port_id: int) -> str:
         """
         Returns input tensor name for the specific node.
 
         :param model: Backend-specific model for the initializer finding.
         :param node_name: Name of the backend-specific node.
+        :param input_port_id: Port Id for input.
         :return: Input tensor name.
         """
 
     @staticmethod
     @abstractmethod
-    def get_output_name(model: TModel, node_name: str, output_id: int) -> str:
+    def get_output_name(model: TModel, node_name: str, output_port_id: int) -> str:
         """
         Returns output tensor name for the specific node.
 
         :param model: Backend-specific model.
         :param node_name: Name of the backend-specific node.
-        :param output_id: Port Id for output.
+        :param output_port_id: Port Id for output.
         :return: Output tensor name.
         """
 
@@ -201,4 +199,18 @@ class BiasCorrectionAlgoBackend(ABC):
         :param model: TModel instance.
         :param nncf_graph: NNCFGraph instance.
         :return: TModel without activation Fake Quantize nodes (or Quantize-Dequantize pairs).
+        """
+
+    @staticmethod
+    @abstractmethod
+    def get_port_id(target_point: TargetPoint) -> int:
+        """
+        Returns port id from the given backend-specific target point.
+        Port id is an input port id in case target point target type is
+        TargetType.PRE_LAYER_OPERATION or TargetType.OPERATOR_PRE_HOOK and
+        is an output port id in case target point target type is
+        TargetType.POST_LAYER_OPERATION or TargetType.OPERATOR_POST_HOOK.
+
+        :param target_point: TargetPoint instance.
+        :return: Port id from the given backend-specific target point
         """

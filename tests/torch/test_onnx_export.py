@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -96,7 +96,9 @@ def test_exporter_parser_format(save_format: str, refs: Any):
     assert args == refs[1]
 
 
-@pytest.mark.parametrize("save_format, ref_opset", (("onnx", 13), ("onnx_9", 9), ("onnx_10", 10), ("onnx_11", 11)))
+@pytest.mark.parametrize(
+    "save_format, ref_opset", (("onnx", 14), ("onnx_9", 9), ("onnx_10", 10), ("onnx_11", 11), ("onnx_13", 13))
+)
 def test_exported_version(tmp_path: str, save_format: str, ref_opset: int):
     model = MockModel()
     config = NNCFConfig()
@@ -188,6 +190,8 @@ def test_preserves_onnx_node_name_format(tmp_path, compression_section):
 
         compressed_model_onnx_node_names = {node.name for node in compressed_model_proto.graph.node}
         for node in original_model_proto.graph.node:
-            assert node.name in compressed_model_onnx_node_names
+            if not node.name.startswith("Identity_"):
+                # Since torch==2.2.0 identity nodes have different indexes
+                assert node.name in compressed_model_onnx_node_names
     finally:
         patch_torch_operators()

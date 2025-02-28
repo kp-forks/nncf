@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -16,28 +16,28 @@ import numpy as np
 import onnx
 
 from nncf import Dataset
-from nncf.experimental.tensor import Tensor
+from nncf.experimental.common.tensor_statistics.statistics import MinMaxTensorStatistic
 from nncf.onnx.graph.nncf_graph_builder import GraphConverter
 from nncf.onnx.graph.onnx_helper import get_edge_dtype
 from nncf.onnx.graph.onnx_helper import get_edge_info_mapping
 from nncf.onnx.graph.onnx_helper import get_edge_shape
-from nncf.onnx.statistics.statistics import ONNXMinMaxTensorStatistic
 from nncf.quantization.advanced_parameters import AdvancedQuantizationParameters
 from nncf.quantization.advanced_parameters import AdvancedSmoothQuantParameters
 from nncf.quantization.algorithms.post_training.algorithm import PostTrainingQuantization
 from nncf.quantization.fake_quantize import FakeQuantizeParameters
+from nncf.tensor import Tensor
+from tests.cross_fw.shared.nx_graph import check_nx_graph
+from tests.cross_fw.shared.nx_graph import compare_nx_graph_with_reference
+from tests.cross_fw.shared.paths import TEST_ROOT
 from tests.onnx.common import get_random_generator
 from tests.onnx.opset_converter import convert_opset_version
-from tests.shared.nx_graph import check_nx_graph
-from tests.shared.nx_graph import compare_nx_graph_with_reference
-from tests.shared.paths import TEST_ROOT
 
 REFERENCE_GRAPHS_TEST_ROOT = "data/reference_graphs/quantization"
 
 
 def mock_collect_statistics(mocker):
-    get_statistics_value = ONNXMinMaxTensorStatistic(
-        min_values=np.array(-1, dtype=np.float32), max_values=np.array(1, dtype=np.float32)
+    get_statistics_value = MinMaxTensorStatistic(
+        min_values=Tensor(np.array(-1, dtype=np.float32)), max_values=Tensor(np.array(1, dtype=np.float32))
     )
     _ = mocker.patch(
         "nncf.quantization.fake_quantize.calculate_quantizer_parameters",
@@ -53,7 +53,7 @@ def mock_collect_statistics(mocker):
         "nncf.common.tensor_statistics.aggregator.StatisticsAggregator.collect_statistics", return_value=None
     )
     _ = mocker.patch(
-        "nncf.common.tensor_statistics.collectors.TensorStatisticCollectorBase.get_statistics",
+        "nncf.experimental.common.tensor_statistics.collectors.TensorCollector.get_statistics",
         return_value=get_statistics_value,
     )
 
@@ -74,8 +74,9 @@ def get_random_dataset_for_test(model: onnx.ModelProto, has_batch_dim: bool, len
             input_dtype = get_edge_dtype(edge)
             input_np_dtype = onnx.helper.tensor_dtype_to_np_dtype(input_dtype)
             shape = get_edge_shape(edge)
+            static_shape = [axis if axis > 0 else 1 for axis in shape]
             rng = get_random_generator()
-            tensor = rng.uniform(-1, 1, shape).astype(input_np_dtype)
+            tensor = rng.uniform(-1, 1, static_shape).astype(input_np_dtype)
             if has_batch_dim:
                 tensor = np.squeeze(tensor, axis=0)
             output[key] = tensor
@@ -113,8 +114,9 @@ def min_max_quantize_model(
 
     advanced_parameters = quantization_params.get("advanced_parameters", AdvancedQuantizationParameters())
 
-    # ONNX backend does not support these algorithms
+    # Turn off bias correction to test only MinMax
     advanced_parameters.disable_bias_correction = True
+    # ONNX backend does not support these algorithms
     advanced_parameters.disable_channel_alignment = True
     advanced_parameters.smooth_quant_alphas = AdvancedSmoothQuantParameters(convolution=-1, matmul=-1)
     quantization_params["advanced_parameters"] = advanced_parameters

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -144,10 +144,10 @@ def create_single_conv_kernel_supernet(
     return multi_elasticity_handler.kernel_handler, supernet
 
 
-def create_two_conv_width_supernet(elasticity_params=None):
+def create_two_conv_width_supernet(elasticity_params=None, model=TwoConvModel):
     params = {"available_elasticity_dims": [ElasticityDim.WIDTH.value]}
     if elasticity_params is not None:
         params.update(elasticity_params)
-    multi_elasticity_handler, supernet = create_supernet(TwoConvModel, TwoConvModel.INPUT_SIZE, params)
+    multi_elasticity_handler, supernet = create_supernet(model, model.INPUT_SIZE, params)
     move_model_to_cuda_if_available(supernet)
     return multi_elasticity_handler.width_handler, supernet

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -143,6 +143,6 @@ def mobilenet_v2_cifar10(pretrained=False, progress=True, device="cpu", **kwargs
     model = MobileNetV2(**kwargs)
     if pretrained:
         script_dir = os.path.dirname(__file__)
-        state_dict = torch.load(script_dir + "/state_dicts/mobilenet_v2.pt", map_location=device)
+        state_dict = torch.load(script_dir + "/state_dicts/mobilenet_v2.pt", map_location=device, weights_only=False)
         model.load_state_dict(state_dict)
     return model

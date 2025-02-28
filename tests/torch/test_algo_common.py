@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -20,6 +20,7 @@ import torch
 from torch import cuda
 from torch import nn
 
+import nncf
 from nncf import NNCFConfig
 from nncf.api.compression import CompressionStage
 from nncf.config.schemata.defaults import VALIDATE_SCOPES
@@ -378,6 +379,7 @@ comp_loss_configs = [
 ]
 
 
+@pytest.mark.cuda
 @pytest.mark.parametrize(
     "config",
     comp_loss_configs,
@@ -395,12 +397,12 @@ def test_compression_loss_gpu_device_compatibility(config):
     compression_ctrl.loss()
 
 
-NOT_SUPPORT_SCOPES_ALGO = ["knowledge_distillation", "NoCompressionAlgorithm"]
+NOT_SUPPORT_SCOPES_ALGO = ["knowledge_distillation", "NoCompressionAlgorithm", "elasticity", "progressive_shrinking"]
 
 
-@pytest.mark.parametrize("algo_name", PT_COMPRESSION_ALGORITHMS.registry_dict.keys() - NOT_SUPPORT_SCOPES_ALGO)
+@pytest.mark.parametrize("algo_name", sorted(PT_COMPRESSION_ALGORITHMS.registry_dict.keys() - NOT_SUPPORT_SCOPES_ALGO))
 @pytest.mark.parametrize("validate_scopes", (True, False, None))
-def test_raise_runtimeerror_for_not_matched_scope_names(algo_name, validate_scopes):
+def test_raise_validationerror_for_not_matched_scope_names(algo_name, validate_scopes):
     model = BasicLinearTestModel()
     config = ConfigCreator().add_algo(algo_name).create()
     config["compression"][0]["ignored_scopes"] = ["unknown"]
@@ -421,7 +423,7 @@ def test_raise_runtimeerror_for_not_matched_scope_names(algo_name, validate_scop
         config["compression"][0]["validate_scopes"] = validate_scopes
 
     if validate_scopes or (validate_scopes is None and VALIDATE_SCOPES is True):
-        with pytest.raises(RuntimeError, match="scope definitions"):
+        with pytest.raises(nncf.ValidationError, match="scope definitions"):
             create_compressed_model_and_algo_for_test(model, config)
     else:
         create_compressed_model_and_algo_for_test(model, config)
@@ -448,15 +450,22 @@ def test_compressed_model_has_controller_references(algos: List[str]):
 
 
 ALGOS_SUPPORTING_SINGLE_LINE_CONFIGS = [
-    x for x in PT_COMPRESSION_ALGORITHMS.registry_dict if x not in ["knowledge_distillation", "movement_sparsity"]
+    x
+    for x in sorted(PT_COMPRESSION_ALGORITHMS.registry_dict.keys())
+    if x
+    not in [
+        "knowledge_distillation",
+        "movement_sparsity",
+        "elasticity",
+        "progressive_shrinking",
+        "NoCompressionAlgorithm",
+    ]
 ]
 
 
 @pytest.mark.parametrize("algo_name", ALGOS_SUPPORTING_SINGLE_LINE_CONFIGS)
 def test_can_apply_algo_with_single_line(algo_name, nncf_caplog):
     model = BasicLinearTestModel()
-    if algo_name == "NoCompressionAlgorithm":
-        pytest.skip()
     config = ConfigCreator().add_algo(algo_name).create()
     with nncf_caplog.at_level(logging.INFO):
         create_compressed_model_and_algo_for_test(model, config)

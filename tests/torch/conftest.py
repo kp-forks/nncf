@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -10,18 +10,23 @@
 # limitations under the License.
 import os
 import random
+from pathlib import Path
 
 import pytest
+from pytest import Config
+from pytest import FixtureRequest
+from pytest import MonkeyPatch
+from pytest import Parser
 
 try:
     import torch
 except:  # noqa: E722
     torch = None
-from nncf.common.quantization.structs import QuantizationMode
-from tests.shared.case_collection import COMMON_SCOPE_MARKS_VS_OPTIONS
-from tests.shared.case_collection import skip_marked_cases_if_options_not_specified
-from tests.shared.install_fixtures import tmp_venv_with_nncf  # noqa: F401
-from tests.shared.logging import nncf_caplog  # noqa: F401
+from nncf.common.quantization.structs import QuantizationScheme as QuantizationMode
+from tests.cross_fw.shared.case_collection import COMMON_SCOPE_MARKS_VS_OPTIONS
+from tests.cross_fw.shared.case_collection import skip_marked_cases_if_options_not_specified
+from tests.cross_fw.shared.install_fixtures import tmp_venv_with_nncf  # noqa: F401
+from tests.cross_fw.shared.logging import nncf_caplog  # noqa: F401
 
 pytest.register_assert_rewrite("tests.torch.helpers")
 
@@ -33,7 +38,7 @@ def disable_tf32_precision():
         torch.backends.cudnn.allow_tf32 = False
 
 
-def pytest_addoption(parser):
+def pytest_addoption(parser: Parser):
     parser.addoption(
         "--data",
         type=str,
@@ -50,6 +55,14 @@ def pytest_addoption(parser):
         "using the current state of the repository.",
     )
     parser.addoption(
+        "--regen-json",
+        action="store_true",
+        default=False,
+        help="If specified, the "
+        "reference .json files will be regenerated "
+        "using the current state of the repository.",
+    )
+    parser.addoption(
         "--torch-home", type=str, default=None, help="Path to cached test models, downloaded by torchvision"
     )
     parser.addoption("--weekly-models", type=str, default=None, help="Path to models' weights for weekly tests")
@@ -60,14 +73,14 @@ def pytest_addoption(parser):
         help="Enable mixed precision for the nncf weekly test",
     )
     parser.addoption(
-        "--sota-checkpoints-dir", type=str, default=None, help="Path to checkpoints directory for sota accuracy test"
+        "--sota-checkpoints-dir", type=Path, default=None, help="Path to checkpoints directory for sota accuracy test"
     )
     parser.addoption(
-        "--sota-data-dir", type=str, default=None, help="Path to datasets directory for sota accuracy test"
+        "--sota-data-dir", type=Path, default=None, help="Path to datasets directory for sota accuracy test"
     )
     parser.addoption(
         "--metrics-dump-path",
-        type=str,
+        type=Path,
         default=None,
         help="Path to directory to store metrics. "
         "Directory must be empty or should not exist."
@@ -76,7 +89,7 @@ def pytest_addoption(parser):
         "if param not specified",
     )
     parser.addoption(
-        "--ov-data-dir", type=str, default=None, help="Path to datasets directory for OpenVINO accuracy test"
+        "--ov-data-dir", type=Path, default=None, help="Path to datasets directory for OpenVINO accuracy test"
     )
     parser.addoption("--imagenet", action="store_true", default=False, help="Enable tests with imagenet")
     parser.addoption(
@@ -110,34 +123,34 @@ def pytest_addoption(parser):
     )
 
 
-def pytest_configure(config):
-    regen_dot = config.getoption("--regen-dot", False)
-    if regen_dot:
-        os.environ["NNCF_TEST_REGEN_DOT"] = "1"
+def pytest_configure(config: Config):
+    for regen_option in ["dot", "json"]:
+        if config.getoption(f"--regen-{regen_option}", False):
+            os.environ[f"NNCF_TEST_REGEN_{regen_option.upper()}"] = "1"
 
 
 @pytest.fixture(scope="module")
-def dataset_dir(request):
+def dataset_dir(request: FixtureRequest):
     return request.config.getoption("--data")
 
 
 @pytest.fixture(scope="module")
-def enable_imagenet(request):
+def enable_imagenet(request: FixtureRequest):
     return request.config.getoption("--imagenet")
 
 
 @pytest.fixture(scope="module")
-def weekly_models_path(request):
+def weekly_models_path(request: FixtureRequest):
     return request.config.getoption("--weekly-models")
 
 
 @pytest.fixture(scope="module")
-def mixed_precision(request):
+def mixed_precision(request: FixtureRequest):
     return request.config.getoption("--mixed-precision")
 
 
 @pytest.fixture(scope="module")
-def sota_checkpoints_dir(request):
+def sota_checkpoints_dir(request: FixtureRequest):
     return request.config.getoption("--sota-checkpoints-dir")
 
 
@@ -147,89 +160,79 @@ def sota_data_dir(request):
 
 
 @pytest.fixture(scope="module")
-def metrics_dump_dir(request):
-    pytest.metrics_dump_path = request.config.getoption("--metrics-dump-path")
-
-
-@pytest.fixture(scope="module")
 def ov_data_dir(request):
     return request.config.getoption("--ov-data-dir")
 
 
 @pytest.fixture(scope="module")
-def install_type(request):
+def install_type(request: FixtureRequest):
     return request.config.getoption("--run-install-tests", skip=True)
 
 
 @pytest.fixture(scope="module")
-def backward_compat_models_path(request):
+def backward_compat_models_path(request: FixtureRequest):
     return request.config.getoption("--backward-compat-models")
 
 
 @pytest.fixture(autouse=True)
-def torch_home_dir(request, monkeypatch):
+def torch_home_dir(request: FixtureRequest, monkeypatch: MonkeyPatch):
     torch_home = request.config.getoption("--torch-home")
     if torch_home:
         monkeypatch.setenv("TORCH_HOME", torch_home)
 
 
 @pytest.fixture(scope="session")
-def third_party(request):
+def third_party(request: FixtureRequest):
     return request.config.getoption("--third-party-sanity")
 
 
 @pytest.fixture(scope="session")
-def torch_with_cuda11(request):
+def torch_with_cuda11(request: FixtureRequest):
     return request.config.getoption("--torch-with-cuda11")
 
 
 @pytest.fixture(scope="session")
-def openvino(request):
+def openvino(request: FixtureRequest):
     return request.config.getoption("--run-openvino-eval")
 
 
 @pytest.fixture(scope="module")
-def onnx_dir(request):
-    return request.config.getoption("--onnx-dir")
-
-
-@pytest.fixture(scope="module")
-def ov_config_dir(request):
+def ov_config_dir(request: FixtureRequest):
     return request.config.getoption("--ov-config-dir")
 
 
 @pytest.fixture(scope="module")
-def pip_cache_dir(request):
+def pip_cache_dir(request: FixtureRequest):
     return request.config.getoption("--pip-cache-dir")
 
 
 @pytest.fixture(params=[True, False], ids=["per_channel", "per_tensor"])
-def is_per_channel(request):
+def is_per_channel(request: FixtureRequest):
     return request.param
 
 
 @pytest.fixture(params=[True, False], ids=["signed", "unsigned"])
-def is_signed(request):
+def is_signed(request: FixtureRequest):
     return request.param
 
 
 @pytest.fixture(params=[True, False], ids=["weights", "activation"])
-def is_weights(request):
+def is_weights(request: FixtureRequest):
     return request.param
 
 
-@pytest.fixture(params=[True, False], ids=["cuda", "cpu"])
-def use_cuda(request):
+@pytest.fixture(params=[pytest.param(True, marks=pytest.mark.cuda), False], ids=["cuda", "cpu"])
+def use_cuda(request: FixtureRequest):
     return request.param
 
 
 @pytest.fixture(params=[True, False], ids=["half_range", "full_range"])
-def is_half_range(request):
+def is_half_range(request: FixtureRequest):
     return request.param
 
 
 @pytest.fixture(params=[QuantizationMode.SYMMETRIC, QuantizationMode.ASYMMETRIC])
-def quantization_mode(request):
+def quantization_mode(request: FixtureRequest):
     return request.param
 
 
@@ -253,25 +256,50 @@ def runs_subprocess_in_precommit():
 
 
 @pytest.fixture(scope="module")
-def cuda_ip(request):
+def distributed_mode_sync_port(request: FixtureRequest):
     return request.config.getoption("--cuda-ip")
 
 
 @pytest.fixture
 def _seed():
-    if torch is not None:
-        from torch.backends import cudnn
+    """
+    Fixture to ensure deterministic randomness across tests.
+    """
+    import numpy as np
+    from torch.backends import cudnn
 
-        cudnn.deterministic = True
-        cudnn.benchmark = False
-        torch.manual_seed(0)
-    try:
-        import numpy as np
+    deterministic = cudnn.deterministic
+    benchmark = cudnn.benchmark
+    seed = torch.seed()
 
-        np.random.seed(0)
-    except ImportError:
-        pass
+    cudnn.deterministic = True
+    cudnn.benchmark = False
+    torch.manual_seed(0)
+    np.random.seed(0)
     random.seed(0)
+
+    yield
+
+    cudnn.deterministic = deterministic
+    cudnn.benchmark = benchmark
+    torch.manual_seed(seed)
+
+
+@pytest.fixture
+def _safe_deterministic_state():
+    """
+    This fixture sets both cuDNN and PyTorch deterministic algorithms to their
+    original states after each test to avoid unintended side effects
+    caused by modifying these settings globally.
+    """
+    import torch
+    from torch.backends import cudnn
+
+    cudnn_deterministic = cudnn.deterministic
+    torch_deterministic = torch.are_deterministic_algorithms_enabled()
+    yield
+    cudnn.deterministic = cudnn_deterministic
+    torch.use_deterministic_algorithms(torch_deterministic)
 
 
 # Custom markers specifying tests to be run only if a specific option

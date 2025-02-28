@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional, Set
 
 import onnx
 
+import nncf
 from nncf.common.graph import NNCFGraph
 from nncf.common.graph.definitions import MODEL_INPUT_OP_NAME
 from nncf.common.graph.definitions import MODEL_OUTPUT_OP_NAME
@@ -22,8 +23,8 @@ from nncf.common.graph.layer_attributes import Dtype
 from nncf.common.graph.operator_metatypes import InputNoopMetatype
 from nncf.common.graph.operator_metatypes import OutputNoopMetatype
 from nncf.onnx.graph.metatypes.groups import CONSTANT_WEIGHT_LAYER_METATYPES
-from nncf.onnx.graph.metatypes.groups import MATMUL_METATYPES
 from nncf.onnx.graph.metatypes.groups import OPERATIONS_WITH_BIAS
+from nncf.onnx.graph.metatypes.groups import POSSIBLE_WEIGHT_LAYER_METATYPES
 from nncf.onnx.graph.metatypes.onnx_metatypes import ONNXGemmMetatype
 from nncf.onnx.graph.metatypes.onnx_metatypes import ONNXOpMetatype
 from nncf.onnx.graph.metatypes.onnx_metatypes import ONNXOpWithWeightsMetatype
@@ -37,7 +38,6 @@ from nncf.onnx.graph.onnx_helper import get_input_port_id_for_node_after_input
 from nncf.onnx.graph.onnx_helper import get_model_inputs
 from nncf.onnx.graph.onnx_helper import get_output_port_id_for_node_before_output
 from nncf.onnx.graph.onnx_helper import get_parents_node_mapping
-from nncf.onnx.graph.onnx_helper import get_port_ids_between_nodes
 from nncf.onnx.graph.onnx_helper import is_node_has_shared_weight
 
 
@@ -46,8 +46,8 @@ class ONNXLayerAttributes(BaseLayerAttributes):
     Every NNCFNode for ONNX backend has a ONNXLayerAttributes.
     If node has weight tensor(-s), information for algorithms about weight is stored in weight_attrs.
     If node has bias tensor, information for algorithms about bias is stored in bias_attrs.
-    If node has attibutes needed for algorithms, they are stored in node_attrs.
-    E.g. 'transA' attirbute of Gemm node for Quantization.
+    If node has attributes needed for algorithms, they are stored in node_attrs.
+    E.g. 'transA' attribute of Gemm node for Quantization.
     """
 
     def __init__(
@@ -57,8 +57,8 @@ class ONNXLayerAttributes(BaseLayerAttributes):
         node_attrs: Optional[Dict[str, Any]] = None,
     ):
         """
-        :param weight_attrs: Maps input port id asocciated with weight to a weight description.
-        :param bias_attrs: Maps bias tensor name asocciated with weight to a weight description.
+        :param weight_attrs: Maps input port id associated with weight to a weight description.
+        :param bias_attrs: Maps bias tensor name associated with weight to a weight description.
         :param node_attrs: Maps attribute name to an attribute value.
         """
         self.weight_attrs = weight_attrs if weight_attrs is not None else {}
@@ -95,7 +95,7 @@ def get_possible_weight_port_ids(metatype: ONNXOpMetatype) -> List[int]:
     :param metatype: Metatype.
     :return: Port ids.
     """
-    if metatype in MATMUL_METATYPES:
+    if metatype in POSSIBLE_WEIGHT_LAYER_METATYPES:
         return metatype.possible_weight_ports
     return []
 
@@ -155,10 +155,10 @@ def _is_node_with_bias(node: onnx.NodeProto, model: onnx.ModelProto) -> bool:
 
 def _get_gemm_attrs(node: onnx.NodeProto) -> Dict[str, int]:
     """
-    Returns transpose attrbiutes of GEMM node.
+    Returns transpose attributes of GEMM node.
 
     :param node: GEMM node.
-    :return: Trnaspose attributes.
+    :return: Transpose attributes.
     """
     gemm_attrs = {"transA": 0, "transB": 0}
     attribute_names = ["transA", "transB"]
@@ -225,11 +225,12 @@ class GraphConverter:
         name_counter = Counter([node.name for node in model.graph.node])
 
         if max(name_counter.values()) > 1:
-            raise RuntimeError(
+            msg = (
                 f"Nodes {[(name, cnt) for name, cnt in name_counter.items() if cnt > 1]} "
                 "(name, counts) occurred more than once. "
                 "NNCF expects every node to have a unique name."
             )
+            raise nncf.ValidationError(msg)
 
         return model
 
@@ -278,7 +279,6 @@ class GraphConverter:
                     output_port_id=output_port_id,
                     dtype=nncf_dtype,
                 )
-                output_port_id += 1
 
     @staticmethod
     def _add_nncf_output_nodes(
@@ -298,32 +298,33 @@ class GraphConverter:
         """
         for i, _output in enumerate(model.graph.output):
             output_name = _output.name
-            layer_attributes = ONNXLayerAttributes()
-            output_node = nncf_graph.add_nncf_node(
-                node_name=MODEL_OUTPUT_OP_NAME + "_" + str(i),
-                node_type=NNCFGraphNodeType.OUTPUT_NODE,
-                node_metatype=OutputNoopMetatype,
-                layer_attributes=layer_attributes,
-            )
-            from_node = parents_node_mapping[output_name]
+            if output_name in parents_node_mapping:
+                layer_attributes = ONNXLayerAttributes()
+                output_node = nncf_graph.add_nncf_node(
+                    node_name=MODEL_OUTPUT_OP_NAME + "_" + str(i),
+                    node_type=NNCFGraphNodeType.OUTPUT_NODE,
+                    node_metatype=OutputNoopMetatype,
+                    layer_attributes=layer_attributes,
+                )
 
-            output_node_node_id = output_node.node_id
-            edge = edge_info_mapping[output_name]
-            output_shape = get_edge_shape(edge)
-            onnx_dtype = get_edge_dtype(edge)
-            nncf_dtype = GraphConverter.convert_onnx_dtype_to_nncf_dtype(onnx_dtype)
-            input_port_id = 0
-            from_node_id = nncf_graph.get_node_by_name(from_node.name).node_id
-            output_port_id = get_output_port_id_for_node_before_output(output_name, from_node)
-            nncf_graph.add_edge_between_nncf_nodes(
-                from_node_id=from_node_id,
-                to_node_id=output_node_node_id,
-                tensor_shape=output_shape,
-                input_port_id=input_port_id,
-                output_port_id=output_port_id,
-                dtype=nncf_dtype,
-            )
-            input_port_id += 1
+                from_node = parents_node_mapping[output_name]
+
+                output_node_node_id = output_node.node_id
+                edge = edge_info_mapping[output_name]
+                output_shape = get_edge_shape(edge)
+                onnx_dtype = get_edge_dtype(edge)
+                nncf_dtype = GraphConverter.convert_onnx_dtype_to_nncf_dtype(onnx_dtype)
+                input_port_id = 0
+                from_node_id = nncf_graph.get_node_by_name(from_node.name).node_id
+                output_port_id = get_output_port_id_for_node_before_output(output_name, from_node)
+                nncf_graph.add_edge_between_nncf_nodes(
+                    from_node_id=from_node_id,
+                    to_node_id=output_node_node_id,
+                    tensor_shape=output_shape,
+                    input_port_id=input_port_id,
+                    output_port_id=output_port_id,
+                    dtype=nncf_dtype,
+                )
 
     @staticmethod
     def convert_onnx_dtype_to_nncf_dtype(onnx_dtype: int) -> Dtype:
@@ -380,32 +381,30 @@ class GraphConverter:
                 is_shared=is_shared,
             )
 
-        for output_node in onnx_model.graph.node:
-            output_edges = output_node.output
-            for output_edge in output_edges:
-                edge = edge_info_mapping.get(output_edge)
-                if edge is None:
-                    # If the edge is None it means that the edge was not added during shape inference of ONNX model.
-                    # BatchNorm exported in Training mode has unused outputs edges: mean, var, saved_mean, saved_var.
-                    # NNCFGraph should not contain such edges.
-                    continue
-                tensor_shape = get_edge_shape(edge)
-                onnx_dtype = get_edge_dtype(edge)
-                nncf_dtype = GraphConverter.convert_onnx_dtype_to_nncf_dtype(onnx_dtype)
-                output_node_id = nncf_graph.get_node_by_name(output_node.name).node_id
-                input_nodes = children_node_mapping[output_edge]
-                for input_node in input_nodes:
-                    port_ids = get_port_ids_between_nodes(output_node, input_node)
-                    input_port_id = port_ids["input_port_id"]
-                    output_port_id = port_ids["output_port_id"]
-                    in_node_id = nncf_graph.get_node_by_name(input_node.name).node_id
+        for node in onnx_model.graph.node:
+            for output_port_id, output_edge_name in enumerate(node.output):
+                for consumed_node in children_node_mapping[output_edge_name]:
+                    edge = edge_info_mapping.get(output_edge_name)
+                    if edge is None:
+                        # If the edge is None it means that the edge was not added during shape inference of ONNX model.
+                        # BatchNorm exported in Training mode has unused outputs edges:
+                        # mean, var, saved_mean, saved_var. NNCFGraph should not contain such edges.
+                        continue
+                    input_port_id = get_input_port_id_for_node_after_input(output_edge_name, consumed_node)
+
+                    in_node_id = nncf_graph.get_node_by_name(node.name).node_id
+                    output_node_id = nncf_graph.get_node_by_name(consumed_node.name).node_id
+                    tensor_shape = get_edge_shape(edge)
+                    onnx_dtype = get_edge_dtype(edge)
+                    nncf_dtype = GraphConverter.convert_onnx_dtype_to_nncf_dtype(onnx_dtype)
+
                     nncf_graph.add_edge_between_nncf_nodes(
-                        from_node_id=output_node_id,
-                        to_node_id=in_node_id,
+                        from_node_id=in_node_id,
+                        to_node_id=output_node_id,
                         tensor_shape=tensor_shape,
                         input_port_id=input_port_id,
                         output_port_id=output_port_id,
-                        dtype=Dtype(nncf_dtype),
+                        dtype=nncf_dtype,
                     )
 
         GraphConverter._add_nncf_input_nodes(onnx_model, nncf_graph, edge_info_mapping, children_node_mapping)

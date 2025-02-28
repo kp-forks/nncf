@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -8,10 +8,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+from pathlib import Path
+
 import pytest
 
-from tests.shared.case_collection import COMMON_SCOPE_MARKS_VS_OPTIONS
-from tests.shared.case_collection import skip_marked_cases_if_options_not_specified
+from tests.cross_fw.shared.case_collection import COMMON_SCOPE_MARKS_VS_OPTIONS
+from tests.cross_fw.shared.case_collection import skip_marked_cases_if_options_not_specified
 
 try:
     import tensorflow as tf
@@ -33,16 +35,16 @@ def clear_session():
 
 
 def pytest_addoption(parser):
-    parser.addoption("--data", type=str, default=None, help="Path to test datasets")
+    parser.addoption("--data", type=Path, default=None, help="Path to test datasets")
     parser.addoption(
-        "--sota-checkpoints-dir", type=str, default=None, help="Path to checkpoints directory for sota accuracy test"
+        "--sota-checkpoints-dir", type=Path, default=None, help="Path to checkpoints directory for sota accuracy test"
     )
     parser.addoption(
-        "--sota-data-dir", type=str, default=None, help="Path to datasets directory for sota accuracy test"
+        "--sota-data-dir", type=Path, default=None, help="Path to datasets directory for sota accuracy test"
     )
     parser.addoption(
         "--metrics-dump-path",
-        type=str,
+        type=Path,
         default=None,
         help="Path to directory to store metrics. "
         "Directory must be empty or should not exist."

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -17,7 +17,7 @@ from nncf.common.initialization.batchnorm_adaptation import BatchnormAdaptationA
 
 # TODO(nlyalyus): WA for the bug 58886, QuantizationMode should be imported after nncf.tensorflow.
 #  Otherwise test_quantize_inputs and test_quantize_outputs_removal will fail, because of invalid inputs quantization
-from nncf.common.quantization.structs import QuantizationMode
+from nncf.common.quantization.structs import QuantizationScheme as QuantizationMode
 from nncf.tensorflow.graph.metatypes.matcher import get_keras_layer_metatype
 from nncf.tensorflow.layers.custom_objects import NNCF_QUANTIZATION_OPERATIONS
 from nncf.tensorflow.layers.data_layout import get_channel_axis
@@ -250,7 +250,7 @@ def get_quantize_inputs_test_model(input_shapes):
 
     inputs = []
     for i, input_shape in enumerate(input_shapes):
-        inputs.append(tf.keras.Input(shape=input_shape[1:], name="input_{}".format(i + 1)))
+        inputs.append(tf.keras.Input(shape=input_shape[1:], name=f"input_{i + 1}"))
 
     input_1, input_2, input_3, input_4, input_5 = inputs
 

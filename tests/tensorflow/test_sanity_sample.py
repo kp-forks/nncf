@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -17,7 +17,9 @@ from pathlib import Path
 
 import pytest
 import tensorflow as tf
+from tensorflow.python.eager import context
 
+import nncf
 from examples.common.sample_config import EVAL_ONLY_ERROR_TEXT
 from examples.tensorflow.classification import main as cls_main
 from examples.tensorflow.common.model_loader import AVAILABLE_MODELS
@@ -25,10 +27,10 @@ from examples.tensorflow.common.prepare_checkpoint import main as prepare_checkp
 from examples.tensorflow.object_detection import main as od_main
 from examples.tensorflow.segmentation import evaluation as seg_eval
 from examples.tensorflow.segmentation import train as seg_train
-from tests.shared.config_factory import ConfigFactory
-from tests.shared.helpers import remove_line_breaks
-from tests.shared.paths import TEST_ROOT
-from tests.shared.paths import get_accuracy_aware_checkpoint_dir_path
+from tests.cross_fw.shared.config_factory import ConfigFactory
+from tests.cross_fw.shared.helpers import remove_line_breaks
+from tests.cross_fw.shared.paths import TEST_ROOT
+from tests.cross_fw.shared.paths import get_accuracy_aware_checkpoint_dir_path
 from tests.tensorflow.helpers import get_cifar10_dataset_builders
 from tests.tensorflow.helpers import get_coco_dataset_builders
 from tests.tensorflow.test_models import SequentialModel
@@ -55,7 +57,7 @@ def run_around_tests():
 
 
 def convert_to_argv(args):
-    return " ".join(key if val is None else "{} {}".format(key, val) for key, val in args.items()).split()
+    return " ".join(key if val is None else f"{key} {val}" for key, val in args.items()).split()
 
 
 SAMPLE_TYPES = [
@@ -111,9 +113,11 @@ GLOBAL_BATCH_SIZE = get_global_batch_size()
 
 DATASET_PATHS = {
     "classification": {
-        x: lambda dataset_root, dataset_name=x: os.path.join(dataset_root, dataset_name)
-        if dataset_root
-        else os.path.join(tempfile.gettempdir(), dataset_name)
+        x: lambda dataset_root, dataset_name=x: (
+            os.path.join(dataset_root, dataset_name)
+            if dataset_root
+            else os.path.join(tempfile.gettempdir(), dataset_name)
+        )
         for x, _ in DATASETS["classification"]
     },
     "object_detection": {
@@ -131,13 +135,14 @@ DATASET_PATHS["classification"]["cifar10"] = lambda dataset_root: TEST_ROOT.join
 
 def get_sample_fn(sample_type, modes):
     variants = []
-    for key in SAMPLES[sample_type].keys():
+    for key in SAMPLES[sample_type]:
         supported_modes = set(key.split("-"))
         if set(modes).issubset(supported_modes):
             variants.append(key)
 
     if len(variants) != 1:
-        raise Exception("Can not choose a function for given arguments")
+        msg = "Can not choose a function for given arguments"
+        raise Exception(msg)
 
     return SAMPLES[sample_type][variants[0]]
 
@@ -149,7 +154,7 @@ def generate_config_params():
         dataset_names, dataset_types = zip(*DATASETS[sample_type])
 
         for params_id, params in enumerate(zip(config_paths, dataset_names, dataset_types, batch_sizes)):
-            config_params.append((sample_type, *params, "{}_{}".format(sample_id, params_id)))
+            config_params.append((sample_type, *params, f"{sample_id}_{params_id}"))
     return config_params
 
 
@@ -170,7 +175,7 @@ def _config(request, dataset_dir):
     with config_path.open() as f:
         jconfig = json.load(f)
 
-    if "checkpoint_save_dir" in jconfig.keys():
+    if "checkpoint_save_dir" in jconfig:
         del jconfig["checkpoint_save_dir"]
 
     jconfig["dataset"] = dataset_name
@@ -209,8 +214,10 @@ def test_model_eval(_config, tmp_path):
     main(convert_to_argv(args))
 
 
+@pytest.mark.nightly
 @pytest.mark.dependency(name="tf_test_model_train")
 def test_model_train(_config, tmp_path, _case_common_dirs):
+    context._reset_context()
     if _config["sample_type"] == "segmentation":
         pytest.skip("ticket #58759")
     checkpoint_save_dir = os.path.join(_case_common_dirs["checkpoint_save_dir"], _config["tid"])
@@ -234,6 +241,7 @@ def test_model_train(_config, tmp_path, _case_common_dirs):
     assert tf.train.latest_checkpoint(checkpoint_save_dir)
 
 
+@pytest.mark.nightly
 @pytest.mark.dependency(depends=["tf_test_model_train"])
 def test_trained_model_eval(_config, tmp_path, _case_common_dirs):
     config_factory = ConfigFactory(_config["nncf_config"], tmp_path / "config.json")
@@ -251,6 +259,7 @@ def test_trained_model_eval(_config, tmp_path, _case_common_dirs):
     main(convert_to_argv(args))
 
 
+@pytest.mark.nightly
 @pytest.mark.dependency(depends=["tf_test_model_train"])
 def test_resume(_config, tmp_path, _case_common_dirs):
     checkpoint_save_dir = os.path.join(str(tmp_path), "models")
@@ -277,6 +286,7 @@ def test_resume(_config, tmp_path, _case_common_dirs):
     assert tf.train.latest_checkpoint(checkpoint_save_dir)
 
 
+@pytest.mark.nightly
 @pytest.mark.dependency(depends=["tf_test_model_train"])
 def test_trained_model_resume_train_test_export_last_ckpt(_config, tmp_path, _case_common_dirs):
     if _config["sample_type"] == "segmentation":
@@ -319,6 +329,7 @@ def get_export_model_name(export_format):
     return model_name
 
 
+@pytest.mark.nightly
 @pytest.mark.dependency(depends=["tf_test_model_train"])
 @pytest.mark.parametrize("export_format", FORMATS, ids=FORMATS)
 def test_export_with_resume(_config, tmp_path, export_format, _case_common_dirs):
@@ -342,7 +353,7 @@ def test_export_with_resume(_config, tmp_path, export_format, _case_common_dirs)
         "--config": config_factory.serialize(),
         "--log-dir": tmp_path,
         "--resume": ckpt_path,
-        "--to-{}".format(export_format): export_path,
+        f"--to-{export_format}": export_path,
     }
 
     main = get_sample_fn(_config["sample_type"], modes=["export"])
@@ -355,6 +366,7 @@ def test_export_with_resume(_config, tmp_path, export_format, _case_common_dirs)
 PREPARE_CHECKPOINTS_SUPPORTED_SAMPLE_TYPES = ["object_detection", "segmentation"]
 
 
+@pytest.mark.nightly
 @pytest.mark.dependency(name="tf_test_prepare_checkpoint", depends=["tf_test_model_train"])
 def test_prepare_checkpoint(_config, tmp_path, _case_common_dirs):
     if _config["sample_type"] not in PREPARE_CHECKPOINTS_SUPPORTED_SAMPLE_TYPES:
@@ -376,6 +388,7 @@ def test_prepare_checkpoint(_config, tmp_path, _case_common_dirs):
     assert tf.train.latest_checkpoint(checkpoint_save_dir)
 
 
+@pytest.mark.nightly
 @pytest.mark.dependency(depends=["tf_test_prepare_checkpoint"])
 def test_eval_prepared_checkpoint(_config, tmp_path, _case_common_dirs):
     if _config["sample_type"] not in PREPARE_CHECKPOINTS_SUPPORTED_SAMPLE_TYPES:
@@ -425,6 +438,7 @@ def _accuracy_aware_config(request, dataset_dir):
     }
 
 
+@pytest.mark.nightly
 @pytest.mark.dependency(name="tf_test_model_train")
 def test_model_accuracy_aware_train(_accuracy_aware_config, tmp_path):
     checkpoint_save_dir = Path(tmp_path)
@@ -448,6 +462,7 @@ def test_model_accuracy_aware_train(_accuracy_aware_config, tmp_path):
     assert tf.train.latest_checkpoint(str(aa_checkpoint_path))
 
 
+@pytest.mark.nightly
 @pytest.mark.parametrize("sample_type", SAMPLE_TYPES)
 def test_eval_only_config_fails_to_train(tmp_path, sample_type):
     config_factory = ConfigFactory(
@@ -458,6 +473,6 @@ def test_eval_only_config_fails_to_train(tmp_path, sample_type):
     }
 
     main = get_sample_fn(sample_type, modes=["train"])
-    with pytest.raises(RuntimeError) as e_info:
+    with pytest.raises(nncf.ValidationError) as e_info:
         main(convert_to_argv(args))
     assert remove_line_breaks(EVAL_ONLY_ERROR_TEXT) in remove_line_breaks(e_info.value.args[0])

@@ -1,4 +1,4 @@
-# Copyright (c) 2023 Intel Corporation
+# Copyright (c) 2025 Intel Corporation
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
 # You may obtain a copy of the License at
@@ -13,6 +13,7 @@ import pytest
 import torch
 from torch.utils.data import DataLoader
 
+import nncf
 from nncf import NNCFConfig
 from nncf.common.quantization.quantizer_setup import SingleConfigQuantizerSetup
 from nncf.torch import create_compressed_model
@@ -23,7 +24,7 @@ from tests.torch.helpers import BasicConvTestModel
 from tests.torch.helpers import OnesDatasetMock
 from tests.torch.helpers import TwoConvTestModel
 from tests.torch.helpers import create_compressed_model_and_algo_for_test
-from tests.torch.test_nncf_network import SimplestModel
+from tests.torch.nncf_network.helpers import SimplestModel
 
 INPUT_SAMPLE_SIZE = [1, 1, 4, 4]
 CONFIG_WITH_ALL_INIT_TYPES = {
@@ -121,7 +122,10 @@ class DeviceCheckingModel(torch.nn.Module):
         return self.model.forward(x)
 
 
-@pytest.mark.parametrize("original_device", ["cpu", "cuda", "cuda:0"])
+@pytest.mark.parametrize(
+    "original_device",
+    ["cpu", pytest.param("cuda", marks=pytest.mark.cuda), pytest.param("cuda:0", marks=pytest.mark.cuda)],
+)
 def test_model_is_inited_with_own_device_by_default(nncf_config_with_default_init_args, original_device):
     if not torch.cuda.is_available() and "cuda" in original_device:
         pytest.skip("Skipping for CPU-only setups")
@@ -133,5 +137,5 @@ def test_repeat_compression_fails():
     model = SimplestModel()
     nncf_config = NNCFConfig.from_dict({"input_info": {"sample_size": SimplestModel.INPUT_SIZE}})
     _ = create_compressed_model(model, nncf_config)
-    with pytest.raises(RuntimeError, match="The model object has already been compressed."):
+    with pytest.raises(nncf.InternalError, match="The model object has already been compressed."):
         _ = create_compressed_model(model, nncf_config)
